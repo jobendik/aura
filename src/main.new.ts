@@ -20,7 +20,7 @@ import { UIManager } from './ui/manager';
 import { NetworkManager } from './network/manager';
 import { VoiceChat } from './core/voice';
 import { PersistenceManager } from './core/persistence';
-import { Star, Echo, Projectile, Particle, FloatingText, Bot } from './game/entities';
+import { Star, Echo, Projectile, Particle, FloatingText } from './game/entities';
 
 // New modular imports
 import { EventBus } from './systems/EventBus';
@@ -70,6 +70,14 @@ const stats: Stats = {
     voice: 0,
     level: 1,
     realms: 1,
+    friends: 0,
+    sings: 0,
+    pulses: 0,
+    emotes: 0,
+    teleports: 0,
+    nightOwl: 0,
+    marathon: 0,
+    constellation: 0,
     ...PersistenceManager.loadStats()
 };
 
@@ -101,7 +109,7 @@ resize();
 
 const camera: Camera = { x: 0, y: 0, tx: 0, ty: 0, shake: 0 };
 const others = new Map<string, OtherPlayer>();
-const bots: Bot[] = [];
+const bots: OtherPlayer[] = []; // Bots now come from server as OtherPlayer with isBot flag
 const stars = new Map<string, Star[]>();
 const echoes: Echo[] = [];
 const projectiles: Projectile[] = [];

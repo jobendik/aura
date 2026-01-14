@@ -73,7 +73,10 @@ class AudioManager {
             nebula: 62,
             void: 41,
             starforge: 73,
-            sanctuary: 49
+            sanctuary: 49,
+            abyss: 36,
+            crystal: 82,
+            celestial: 110
         };
         const freq = frequencies[realm] || 55;
         if (this.drone && this.ctx) {

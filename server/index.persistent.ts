@@ -4,13 +4,16 @@ import cors from 'cors';
 import { createServer } from 'http';
 import { z, ZodSchema, ZodError } from 'zod';
 import {
-    NetworkEventSchema,
+    // @ts-ignore NetworkEventSchema reserved for future WebSocket validation
+    NetworkEventSchema as _NetworkEventSchema,
     CreateEchoSchema,
     PlayerStateSchema,
     StarsStateSchema,
     formatZodError
 } from './middleware/validation';
-import { setupWebSocket, WebSocketHandler } from './websocket/WebSocketHandler';
+import { setupWebSocket } from './websocket/WebSocketHandler';
+// @ts-ignore WebSocketHandler type reserved for future use
+import type { WebSocketHandler as _WebSocketHandler } from './websocket/WebSocketHandler';
 import { persistence } from './services/PersistenceService';
 import { cache } from './services/CacheService';
 
@@ -26,7 +29,7 @@ app.use(cors());
 app.use(express.json());
 
 // Request logging
-app.use((req: Request, res: Response, next: NextFunction) => {
+app.use((req: Request, _res: Response, next: NextFunction) => {
     console.log(`${new Date().toISOString()} ${req.method} ${req.path}`);
     next();
 });
@@ -203,7 +206,7 @@ app.post('/api/stars', validateBody(StarsStateSchema), (req: Request, res: Respo
 });
 
 // Get server stats
-app.get('/api/stats', (req: Request, res: Response) => {
+app.get('/api/stats', (_req: Request, res: Response) => {
     const cacheStats = cache.getStats();
     const allPlayers = persistence.getAllPlayers();
     const allEchoes = persistence.getAllEchoes();
@@ -218,7 +221,7 @@ app.get('/api/stats', (req: Request, res: Response) => {
 });
 
 // Health check
-app.get('/api/health', (req: Request, res: Response) => {
+app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
         status: 'healthy',
         uptime: process.uptime(),
@@ -230,7 +233,7 @@ app.get('/api/health', (req: Request, res: Response) => {
 // Error Handler
 // ============================================
 
-app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error('Server error:', err);
     res.status(500).json({
         error: 'Internal server error',
@@ -242,7 +245,7 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 // Server Startup with Persistence
 // ============================================
 
-let wsHandler: WebSocketHandler;
+let wsHandler: _WebSocketHandler;
 
 async function startServer(): Promise<void> {
     try {

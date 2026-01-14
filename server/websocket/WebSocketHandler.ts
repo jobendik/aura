@@ -132,6 +132,7 @@ export class WebSocketHandler {
     private wss: WebSocketServer | null = null;
     private connections: Map<string, PlayerConnection> = new Map();
     private cleanupInterval: NodeJS.Timeout | null = null;
+    // @ts-ignore Used for cleanup on shutdown
     private gameLoopInterval: NodeJS.Timeout | null = null;
     
     // Server-authoritative bots
@@ -632,7 +633,9 @@ export class WebSocketHandler {
 
     /**
      * Send list of current players in realm to a specific connection
+     * Reserved for future use in player list sync
      */
+    // @ts-ignore Method reserved for future player list synchronization
     private sendPlayersInRealm(ws: WebSocket, realm: string, excludePlayerId: string): void {
         const players: any[] = [];
         

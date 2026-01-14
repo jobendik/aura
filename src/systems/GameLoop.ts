@@ -2,7 +2,7 @@
 import { CONFIG } from '../core/config';
 import { GameLogic } from '../game/logic';
 import type { Player, Camera, OtherPlayer, Settings, RealmId } from '../types';
-import type { Star, Echo, Projectile, Particle, FloatingText, Bot } from '../game/entities';
+import type { Star, Echo, Projectile, Particle, FloatingText } from '../game/entities';
 import type { Renderer } from '../game/renderer';
 import type { BotController } from '../controllers/BotController';
 
@@ -14,7 +14,7 @@ interface GameLoopConfig {
     getPlayer: () => Player;
     getCamera: () => Camera;
     getOthers: () => Map<string, OtherPlayer>;
-    getBots: () => Bot[];
+    getBots: () => OtherPlayer[]; // Bots are now OtherPlayers with isBot=true
     getStars: () => Map<string, Star[]>;
     getEchoes: () => Echo[];
     getProjectiles: () => Projectile[];

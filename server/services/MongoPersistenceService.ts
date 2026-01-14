@@ -1,7 +1,9 @@
 // MongoDB-backed persistence service for AURA
 // Replaces file-based persistence with proper database storage
 
-import { database, Echo, Message, LitStar, Player, IEcho, IMessage, IPlayer } from '../database';
+import { database, Echo, Message, LitStar, Player } from '../database';
+// IEcho, IMessage, IPlayer reserved for future type guards
+import type { IEcho as _IEcho, IMessage as _IMessage, IPlayer as _IPlayer } from '../database';
 
 interface EchoData {
     id: string;

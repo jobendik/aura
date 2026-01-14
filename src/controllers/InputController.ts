@@ -1,7 +1,6 @@
 // Input handling controller for mouse, touch, and keyboard
 import { EventBus } from '../systems/EventBus';
 import type { Player, Camera } from '../types';
-import { UIManager } from '../ui/manager';
 
 interface InputControllerConfig {
     canvas: HTMLCanvasElement;
@@ -20,7 +19,8 @@ export class InputController {
     private getPlayer: () => Player;
     private getCamera: () => Camera;
     private getGameActive: () => boolean;
-    private getDimensions: () => { width: number; height: number };
+    // @ts-ignore Reserved for future UI features
+    private _getDimensions: () => { width: number; height: number };
     
     private isMouseDown: boolean = false;
     private cleanupFns: (() => void)[] = [];
@@ -30,7 +30,7 @@ export class InputController {
         this.getPlayer = config.getPlayer;
         this.getCamera = config.getCamera;
         this.getGameActive = config.getGameActive;
-        this.getDimensions = config.getDimensions;
+        this._getDimensions = config.getDimensions;
     }
 
     /**

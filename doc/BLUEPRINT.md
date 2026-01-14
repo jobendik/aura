@@ -1,9 +1,9 @@
 # AURA — The Social Cosmos
 ## Complete Project Blueprint & Implementation Guide
 
-**Version:** 2.0.0  
-**Last Updated:** 2025-01-13  
-**Status:** Active Development  
+**Version:** 2.1.0  
+**Last Updated:** 2026-01-14  
+**Status:** Phase 3 - Social Depth  
 
 ---
 
@@ -282,10 +282,10 @@ Build:
 | Voice toggle UI | ✅ | P0 | Button + status |
 | Voice visualizer | ✅ | P1 | Animated bars |
 | Speaking indicator | ✅ | P1 | Ring around speaking players |
-| WebRTC peer connection | ⏳ | P0 | CRITICAL - Not implemented |
-| Spatial audio falloff | ⏳ | P0 | Volume by distance |
-| Push-to-talk option | ⏳ | P1 | Alternative to always-on |
-| Voice activity detection | ⏳ | P1 | Auto-detect speaking |
+| WebRTC peer connection | ✅ | P0 | Implemented in src/core/voice.ts |
+| Spatial audio falloff | ✅ | P0 | Volume by distance |
+| Push-to-talk option | ✅ | P1 | Hold Space to transmit |
+| Voice activity detection | ✅ | P1 | Auto-detect speaking |
 | Voice channel rooms | 💡 | P2 | Separate voice channels |
 | Voice effects | 💡 | P3 | Realm-based voice filters |
 
@@ -478,8 +478,8 @@ Build:
 | Chord playback | ✅ | P0 | 3-note chords |
 | Volume control | ✅ | P0 | Master gain node |
 | Mute toggle | ✅ | P0 | Settings integration |
-| Spatial audio | ⏳ | P1 | Distance-based volume |
-| Voice integration | ⏳ | P0 | WebRTC audio routing |
+| Spatial audio | ✅ | P1 | Distance-based volume via VoiceChat |
+| Voice integration | ✅ | P0 | WebRTC in src/core/voice.ts |
 
 ---
 
@@ -1119,21 +1119,21 @@ if (firebaseConfig && typeof firebase !== 'undefined') {
 
 ## 11. Future Roadmap
 
-### Phase 1: Polish (Current)
-- [ ] Fix any remaining bugs
-- [ ] Performance optimization
-- [ ] Mobile touch improvements
-- [ ] Settings persistence
-- [ ] Quest reset timer
+### Phase 1: Polish ✅ COMPLETE
+- [x] Fix any remaining bugs
+- [x] Performance optimization
+- [x] Mobile touch improvements
+- [x] Settings persistence (src/core/persistence.ts)
+- [x] Quest reset timer
 
-### Phase 2: Voice Chat
-- [ ] WebRTC peer connections
-- [ ] Signaling via Firebase
-- [ ] Spatial audio mixing
-- [ ] Push-to-talk option
-- [ ] Voice activity detection
+### Phase 2: Voice Chat ✅ COMPLETE
+- [x] WebRTC peer connections (src/core/voice.ts)
+- [x] Signaling via Firebase
+- [x] Spatial audio mixing
+- [x] Push-to-talk option
+- [x] Voice activity detection
 
-### Phase 3: Social Depth
+### Phase 3: Social Depth (CURRENT)
 - [ ] Friend system (add/remove)
 - [ ] Friend persistence (Firebase)
 - [ ] Online status indicators
@@ -1168,13 +1168,13 @@ if (firebaseConfig && typeof firebase !== 'undefined') {
 ### Critical
 | Issue | Status | Notes |
 |-------|--------|-------|
-| Voice chat not functional | Open | UI exists, WebRTC not implemented |
+| ~~Voice chat not functional~~ | ✅ Resolved | Implemented in src/core/voice.ts |
 
 ### High Priority
 | Issue | Status | Notes |
 |-------|--------|-------|
-| Quest reset not implemented | Open | Should reset at midnight |
-| Settings not persisted | Open | localStorage integration needed |
+| ~~Quest reset not implemented~~ | ✅ Resolved | Daily reset with timer in persistence.ts |
+| ~~Settings not persisted~~ | ✅ Resolved | PersistenceManager in src/core/persistence.ts |
 | Bond persistence missing | Open | Bonds lost on refresh |
 
 ### Medium Priority

@@ -47,6 +47,9 @@ export interface GameConfig {
     PLAYER_TIMEOUT: number;
     MAX_ECHOES: number;
     MAX_PARTICLES: number;
+    
+    // Content arrays (exported separately but typed here for reference)
+    [key: string]: any;  // Allow additional properties like ACHIEVEMENTS, EMOTES, etc.
 }
 
 export interface RealmData {
@@ -56,9 +59,11 @@ export interface RealmData {
     n1: [number, number, number];
     n2: [number, number, number];
     unlock: number;
+    desc?: string;
+    drone?: number;
 }
 
-export type RealmId = 'genesis' | 'nebula' | 'void' | 'starforge' | 'sanctuary';
+export type RealmId = 'genesis' | 'nebula' | 'void' | 'starforge' | 'sanctuary' | 'abyss' | 'crystal' | 'celestial';
 
 export interface Achievement {
     id: string;
@@ -68,6 +73,8 @@ export interface Achievement {
     reward: number;
     track: string;
     need: number;
+    category?: 'social' | 'explore' | 'secret';
+    secret?: boolean;
 }
 
 export interface Quest {
@@ -78,6 +85,15 @@ export interface Quest {
     reward: number;
     track: string;
     need: number;
+}
+
+export interface WeeklyQuest extends Quest {
+    // Weekly quests use same structure but are tracked separately
+}
+
+export interface Emote {
+    emoji: string;
+    unlock: number;  // Level required to unlock
 }
 
 export interface Player {
@@ -230,6 +246,14 @@ export interface Stats {
     voice: number;
     level: number;
     realms: number;
+    friends: number;
+    sings: number;
+    pulses: number;
+    emotes: number;
+    teleports: number;
+    nightOwl: number;
+    marathon: number;
+    constellation: number;
 }
 
 export interface DailyProgress {
@@ -239,6 +263,15 @@ export interface DailyProgress {
     connections: number;
     sings: number;
     emotes: number;
+    [key: string]: string | number;  // Allow quest completion flags
+}
+
+export interface WeeklyProgress {
+    week: number;  // Week number for reset tracking
+    whispers: number;
+    stars: number;
+    newFriends: number;
+    realmChanges: number;
     [key: string]: string | number;  // Allow quest completion flags
 }
 

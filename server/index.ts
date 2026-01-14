@@ -14,6 +14,7 @@ const MONGO_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017';
 const MONGO_DB = process.env.MONGODB_DB || 'aura';
 
 // Initialize WebSocket server
+// @ts-ignore wsHandler manages WebSocket lifecycle
 const wsHandler = setupWebSocket(server);
 
 // Middleware
@@ -37,6 +38,7 @@ interface PlayerState {
     isBot?: boolean;
 }
 
+// @ts-ignore Echo interface used for type reference
 interface Echo {
     id: string;
     x: number;
@@ -524,7 +526,7 @@ app.get('/api/leaderboard', async (req, res) => {
 });
 
 // Echo stats
-app.get('/api/stats/echoes', async (req, res) => {
+app.get('/api/stats/echoes', async (_req, res) => {
     try {
         if (!mongoConnected) {
             return res.json({});

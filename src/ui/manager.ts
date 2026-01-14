@@ -144,10 +144,21 @@ export class UIManager {
         const level = GameLogic.getLevel(playerXP);
         const realmButtons = document.querySelectorAll('.realm');
 
+        // Realm unlock levels: genesis=1, nebula=1, void=1, starforge=5, abyss=7, crystal=8, sanctuary=10, celestial=11
+        const unlockLevels: Record<string, number> = {
+            genesis: 1,
+            nebula: 1,
+            void: 1,
+            starforge: 5,
+            abyss: 7,
+            crystal: 8,
+            sanctuary: 10,
+            celestial: 11
+        };
+
         realmButtons.forEach(btn => {
             const realmId = btn.getAttribute('data-realm');
-            // Genesis is always unlocked, others unlock at specific levels
-            const unlockLevel = realmId === 'genesis' ? 1 : realmId === 'nebula' ? 3 : realmId === 'void' ? 7 : realmId === 'starforge' ? 5 : 999;
+            const unlockLevel = realmId ? (unlockLevels[realmId] || 999) : 999;
             btn.classList.toggle('locked', level < unlockLevel);
         });
     }
@@ -323,23 +334,26 @@ export class UIManager {
 
     // Update quests panel
     static updateQuests(): void {
-        const questList = document.getElementById('quest-list');
-        if (!questList) return;
+        const dailyList = document.getElementById('daily-quest-list');
+        const weeklyList = document.getElementById('weekly-quest-list');
+        const weeklyTimer = document.getElementById('weekly-reset-timer');
+        
+        if (!dailyList) return;
 
-        // TODO: Load actual quests from game state
-        const quests = [
-            { name: 'First Contact', desc: 'Connect with another soul', progress: 0, total: 1, reward: 50, complete: false },
-            { name: 'Star Lighter', desc: 'Light 10 stars with Pulse', progress: 0, total: 10, reward: 25, complete: false },
-            { name: 'Echo Planter', desc: 'Plant 3 echoes', progress: 0, total: 3, reward: 30, complete: false }
-        ];
+        // Daily quests from config (QUESTS are the daily quests)
+        const dailyQuests = (CONFIG as any).QUESTS || [];
 
-        questList.innerHTML = '';
-        quests.forEach(quest => {
+        dailyList.innerHTML = '';
+        dailyQuests.forEach((quest: any) => {
             const item = document.createElement('div');
             item.className = 'quest-item';
-            if (quest.complete) item.classList.add('complete');
+            
+            // TODO: Get actual progress from dailyProgress
+            const progress = 0;
+            const complete = progress >= quest.need;
+            if (complete) item.classList.add('complete');
 
-            const pct = Math.round((quest.progress / quest.total) * 100);
+            const pct = Math.round((progress / quest.need) * 100);
             item.innerHTML = `
                 <div class="quest-header">
                     <div class="quest-name">${quest.name}</div>
@@ -350,12 +364,57 @@ export class UIManager {
                     <div class="quest-bar">
                         <div class="quest-bar-fill" style="width: ${pct}%"></div>
                     </div>
-                    <div class="quest-count">${quest.progress} / ${quest.total}</div>
+                    <div class="quest-count">${progress} / ${quest.need}</div>
                 </div>
             `;
-
-            questList.appendChild(item);
+            dailyList.appendChild(item);
         });
+
+        // Weekly quests
+        if (weeklyList) {
+            weeklyList.innerHTML = '';
+            const weeklyQuests = (CONFIG as any).WEEKLY_QUESTS || [];
+            
+            weeklyQuests.forEach((quest: any) => {
+                const item = document.createElement('div');
+                item.className = 'quest-item weekly';
+                
+                // TODO: Get actual progress from weeklyProgress
+                const progress = 0;
+                const complete = progress >= quest.need;
+                if (complete) item.classList.add('complete');
+
+                const pct = Math.round((progress / quest.need) * 100);
+                item.innerHTML = `
+                    <div class="weekly-label">Weekly Challenge</div>
+                    <div class="quest-header">
+                        <div class="quest-name">${quest.name}</div>
+                        <div class="quest-reward">+${quest.reward} XP</div>
+                    </div>
+                    <div class="quest-desc">${quest.desc}</div>
+                    <div class="quest-progress">
+                        <div class="quest-bar">
+                            <div class="quest-bar-fill" style="width: ${pct}%"></div>
+                        </div>
+                        <div class="quest-count">${progress} / ${quest.need}</div>
+                    </div>
+                `;
+                weeklyList.appendChild(item);
+            });
+        }
+
+        // Update weekly timer
+        if (weeklyTimer) {
+            // Calculate time until next Monday
+            const now = new Date();
+            const nextMonday = new Date(now);
+            nextMonday.setDate(now.getDate() + ((1 + 7 - now.getDay()) % 7 || 7));
+            nextMonday.setHours(0, 0, 0, 0);
+            const msLeft = nextMonday.getTime() - now.getTime();
+            const hoursLeft = Math.floor(msLeft / (1000 * 60 * 60));
+            const daysLeft = Math.floor(hoursLeft / 24);
+            weeklyTimer.textContent = `Resets in ${daysLeft}d ${hoursLeft % 24}h`;
+        }
     }
 
     // Update achievements panel
@@ -363,39 +422,51 @@ export class UIManager {
         const achGrid = document.getElementById('ach-grid');
         if (!achGrid) return;
 
-        // TODO: Load actual achievements from game state
-        const achievements = [
-            { id: 'first-steps', name: 'First Steps', desc: 'Begin your journey', icon: '👣', unlocked: true, progress: 1, total: 1, reward: '+10 XP' },
-            { id: 'socialite', name: 'Socialite', desc: 'Connect with 5 souls', icon: '💫', unlocked: false, progress: 0, total: 5, reward: '+50 XP' },
-            { id: 'star-gazer', name: 'Star Gazer', desc: 'Light 100 stars', icon: '⭐', unlocked: false, progress: 0, total: 100, reward: '+100 XP' },
-            { id: 'echo-master', name: 'Echo Master', desc: 'Plant 25 echoes', icon: '🔮', unlocked: false, progress: 0, total: 25, reward: '+75 XP' },
-            { id: 'singer', name: 'Cosmic Singer', desc: 'Sing 50 times', icon: '🎵', unlocked: false, progress: 0, total: 50, reward: '+60 XP' },
-            { id: 'explorer', name: 'Realm Explorer', desc: 'Visit all 5 realms', icon: '🗺️', unlocked: false, progress: 1, total: 5, reward: '+200 XP' }
-        ];
+        // Get achievements from CONFIG
+        const achievements = CONFIG.ACHIEVEMENTS;
+        
+        // TODO: Get unlocked set from game state - for now use localStorage
+        let unlockedSet: Set<string>;
+        try {
+            const saved = localStorage.getItem('aura_achievements');
+            unlockedSet = saved ? new Set(JSON.parse(saved)) : new Set();
+        } catch {
+            unlockedSet = new Set();
+        }
 
         achGrid.innerHTML = '';
-        achievements.forEach(ach => {
+        achievements.forEach((ach: any) => {
             const card = document.createElement('div');
             card.className = 'ach-card';
-            if (ach.unlocked) card.classList.add('unlocked');
-            else card.classList.add('locked');
+            const isUnlocked = unlockedSet.has(ach.id);
+            
+            if (isUnlocked) {
+                card.classList.add('unlocked');
+            } else {
+                card.classList.add('locked');
+            }
+            
+            // Add category class for styling
+            if (ach.secret) {
+                card.classList.add('secret');
+            }
 
-            const pct = Math.round((ach.progress / ach.total) * 100);
             card.innerHTML = `
-                <div class="ach-icon">${ach.icon}</div>
+                <div class="ach-icon">${ach.secret && !isUnlocked ? '❓' : ach.icon}</div>
                 <div class="ach-info">
-                    <div class="ach-name">${ach.name}</div>
-                    <div class="ach-desc">${ach.desc}</div>
-                    <div class="ach-reward">${ach.reward}</div>
-                    ${!ach.unlocked ? `<div class="ach-bar"><div class="ach-bar-fill" style="width: ${pct}%"></div></div>` : ''}
+                    <div class="ach-name">${ach.secret && !isUnlocked ? '???' : ach.name}</div>
+                    <div class="ach-desc">${ach.secret && !isUnlocked ? 'Secret achievement' : ach.desc}</div>
+                    <div class="ach-reward">+${ach.xp} XP</div>
                 </div>
             `;
 
             achGrid.appendChild(card);
         });
 
-        // Update counts
-        const unlockedCount = achievements.filter(a => a.unlocked).length;
+        // Update counts (only count non-secret or unlocked secret achievements)
+        // @ts-ignore Reserved for filtered view
+        const _visibleTotal = achievements.filter((a: any) => !a.secret).length;
+        const unlockedCount = achievements.filter((a: any) => unlockedSet.has(a.id)).length;
         const achCount = document.getElementById('ach-count');
         const achTotal = document.getElementById('ach-total');
         if (achCount) achCount.textContent = unlockedCount.toString();

@@ -1,6 +1,6 @@
 // Main entry point for AURA application
 import { AudioManager } from './core/audio';
-import { CONFIG } from './core/config';
+import { CONFIG, EMOTES, ACHIEVEMENTS } from './core/config';
 import { Renderer } from './game/renderer';
 import { GameLogic } from './game/logic';
 import { UIManager } from './ui/manager';
@@ -10,7 +10,7 @@ import { EventBus } from './systems/EventBus';
 import { VoiceChat } from './core/voice';
 import { PersistenceManager } from './core/persistence';
 import { Star, Echo, Projectile, Particle, FloatingText } from './game/entities';
-import type { Player, Camera, Settings, GameState, OtherPlayer, Stats, DailyProgress } from './types';
+import type { Player, Camera, Settings, GameState, OtherPlayer, Stats, DailyProgress, WeeklyProgress } from './types';
 
 // Initialize game state
 const settings: Settings = {
@@ -40,7 +40,8 @@ const gameState: GameState = {
 
 // Initialize managers
 const audio = new AudioManager(settings);
-const network = new NetworkManager();
+// @ts-ignore Reserved for future HTTP fallback
+const _network = new NetworkManager();
 const voiceChat = new VoiceChat(settings);
 
 // Initialize WebSocket client for real-time sync
@@ -66,11 +67,24 @@ const stats: Stats = {
     voice: 0,
     level: 1,
     realms: 1,
+    friends: 0,
+    sings: 0,
+    pulses: 0,
+    emotes: 0,
+    teleports: 0,
+    nightOwl: 0,
+    marathon: 0,
+    constellation: 0,
     ...PersistenceManager.loadStats()
 };
 
 let dailyProgress: DailyProgress = PersistenceManager.loadDailyProgress();
+let weeklyProgress: WeeklyProgress = PersistenceManager.loadWeeklyProgress();
 const unlocked = PersistenceManager.loadAchievements();
+const friends: Set<string> = PersistenceManager.loadFriends();
+const visitedRealms: Set<string> = PersistenceManager.loadVisitedRealms();
+// @ts-ignore Reserved for friends panel
+const _recentPlayers = PersistenceManager.loadRecent();
 
 // Canvas setup
 const canvas = document.getElementById('cosmos') as HTMLCanvasElement;
@@ -228,6 +242,54 @@ function setupUI(): void {
         });
     });
 
+    // Quest tabs (daily/weekly)
+    document.querySelectorAll('#quests .panel-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabType = (tab as HTMLElement).dataset.tab;
+            document.querySelectorAll('#quests .panel-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            
+            const dailyList = document.getElementById('daily-quest-list');
+            const weeklyList = document.getElementById('weekly-quest-list');
+            const weeklyTimer = document.getElementById('weekly-reset-timer');
+            
+            if (tabType === 'daily') {
+                if (dailyList) dailyList.style.display = 'block';
+                if (weeklyList) weeklyList.style.display = 'none';
+                if (weeklyTimer) weeklyTimer.style.display = 'none';
+            } else if (tabType === 'weekly') {
+                if (dailyList) dailyList.style.display = 'none';
+                if (weeklyList) weeklyList.style.display = 'block';
+                if (weeklyTimer) weeklyTimer.style.display = 'block';
+            }
+        });
+    });
+
+    // Achievement tabs (all/social/explore/secret)
+    document.querySelectorAll('#achievements .ach-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            const category = (tab as HTMLElement).dataset.achTab;
+            document.querySelectorAll('#achievements .ach-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            
+            const achCards = document.querySelectorAll('#ach-grid .ach-card');
+            const achievements = ACHIEVEMENTS;
+            
+            achCards.forEach((card, i) => {
+                const ach = achievements[i];
+                if (!ach) return;
+                
+                if (category === 'all') {
+                    (card as HTMLElement).style.display = 'flex';
+                } else if (category === 'secret') {
+                    (card as HTMLElement).style.display = ach.secret ? 'flex' : 'none';
+                } else {
+                    (card as HTMLElement).style.display = ach.category === category ? 'flex' : 'none';
+                }
+            });
+        });
+    });
+
     // Realm switching
     document.querySelectorAll('.realm').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -315,6 +377,54 @@ function setupUI(): void {
             UIManager.toast(`Following ${other.name}...`);
         }
         UIManager.hideProfile();
+    });
+
+    // Friend button
+    document.getElementById('prof-friend')?.addEventListener('click', () => {
+        if (!gameState.selectedId) return;
+        const other = others.get(gameState.selectedId);
+        if (!other) return;
+        
+        const friendBtn = document.getElementById('prof-friend');
+        if (friends.has(gameState.selectedId)) {
+            friends.delete(gameState.selectedId);
+            PersistenceManager.saveFriends(friends);
+            if (friendBtn) {
+                friendBtn.textContent = '❤️ Add Friend';
+                friendBtn.classList.remove('active');
+            }
+            UIManager.toast(`Removed ${other.name} from friends`);
+            stats.friends = friends.size;
+        } else {
+            friends.add(gameState.selectedId);
+            PersistenceManager.saveFriends(friends);
+            if (friendBtn) {
+                friendBtn.textContent = '💔 Remove Friend';
+                friendBtn.classList.add('active');
+            }
+            UIManager.toast(`Added ${other.name} as friend! ❤️`, 'success');
+            stats.friends = friends.size;
+            weeklyProgress.newFriends++;
+            PersistenceManager.saveWeeklyProgress(weeklyProgress);
+            checkAchievements();
+        }
+    });
+
+    // Teleport button (only works for friends in same realm)
+    document.getElementById('prof-teleport')?.addEventListener('click', () => {
+        if (!gameState.selectedId) return;
+        const other = others.get(gameState.selectedId);
+        if (!other || !friends.has(gameState.selectedId)) return;
+        
+        // Teleport near the friend
+        player.x = other.x + (Math.random() - 0.5) * 100;
+        player.y = other.y + (Math.random() - 0.5) * 100;
+        player.tx = player.x;
+        player.ty = player.y;
+        stats.teleports++;
+        UIManager.toast(`Teleported to ${other.name}! 🌀`);
+        UIManager.hideProfile();
+        checkAchievements();
     });
 
     // Click outside to close emotes
@@ -489,7 +599,10 @@ function changeRealm(realmId: string): void {
         nebula: { icon: '🌸', name: 'Nebula Gardens' },
         void: { icon: '🌑', name: 'The Void' },
         starforge: { icon: '🔥', name: 'Starforge' },
-        sanctuary: { icon: '🏛️', name: 'Sanctuary' }
+        abyss: { icon: '🕳️', name: 'The Abyss' },
+        crystal: { icon: '💎', name: 'Crystal Caverns' },
+        sanctuary: { icon: '🏛️', name: 'Sanctuary' },
+        celestial: { icon: '👑', name: 'Celestial Throne' }
     };
 
     const realm = realmData[realmId];
@@ -504,6 +617,16 @@ function changeRealm(realmId: string): void {
             document.querySelector(`[data-realm="${realmId}"]`)?.classList.add('active');
             document.getElementById('realm-icon')!.textContent = realm.icon;
             document.getElementById('realm-text')!.textContent = realm.name;
+
+            // Track visited realms
+            if (!visitedRealms.has(realmId)) {
+                visitedRealms.add(realmId);
+                PersistenceManager.saveVisitedRealms(visitedRealms);
+                stats.realms = visitedRealms.size;
+                weeklyProgress.realmChanges++;
+                PersistenceManager.saveWeeklyProgress(weeklyProgress);
+                checkAchievements();
+            }
 
             // Clear other players and stars from old realm
             others.clear();
@@ -552,21 +675,39 @@ function setupEmotes(): void {
     const wheel = document.getElementById('emotes');
     if (!wheel) return;
 
-    const EMOTES = ['😊', '❤️', '👋', '✨', '🌟', '🔥', '💫', '🎵'];
+    // Use level-locked emotes from config
+    const emotes = EMOTES;
+    const playerLevel = GameLogic.getLevel(player.xp);
     const radius = 65;
 
-    EMOTES.forEach((emote, i) => {
-        const angle = (i / EMOTES.length) * Math.PI * 2 - Math.PI / 2;
+    // Display up to 12 emotes in the wheel (more can be unlocked)
+    const displayEmotes = emotes.slice(0, 12);
+
+    displayEmotes.forEach((emoteData: { emoji: string; unlock: number }, i: number) => {
+        const angle = (i / displayEmotes.length) * Math.PI * 2 - Math.PI / 2;
         const x = 95 + Math.cos(angle) * radius - 20;
         const y = 95 + Math.sin(angle) * radius - 20;
 
         const opt = document.createElement('div');
         opt.className = 'emote';
-        opt.textContent = emote;
+        const isUnlocked = playerLevel >= emoteData.unlock;
+        
+        if (!isUnlocked) {
+            opt.classList.add('locked');
+            opt.innerHTML = `${emoteData.emoji}<span class="emote-level">Lv${emoteData.unlock}</span>`;
+        } else {
+            opt.textContent = emoteData.emoji;
+        }
+        
         opt.style.left = `${x}px`;
         opt.style.top = `${y}px`;
+        
         opt.addEventListener('click', () => {
-            doEmote(emote);
+            if (!isUnlocked) {
+                UIManager.toast(`Unlock at Level ${emoteData.unlock}`, 'warning');
+                return;
+            }
+            doEmote(emoteData.emoji);
             UIManager.hideEmoteWheel();
         });
 
@@ -643,6 +784,10 @@ function applySingEffect(playerId: string, x: number, y: number, hue: number): v
     if (isSelf) {
         player.singing = 1;
         if (settings.shake) camera.shake = 0.3;
+        stats.sings++;
+        dailyProgress.sings++;
+        PersistenceManager.saveDailyProgress(dailyProgress);
+        checkAchievements();
     } else {
         // Update other player's singing state
         const other = others.get(playerId);
@@ -663,6 +808,7 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
     if (isSelf) {
         player.pulsing = 1;
         if (settings.shake) camera.shake = 0.5;
+        stats.pulses++;
         
         // Light stars for local player
         const viewRadius = GameLogic.getViewRadius(player);
@@ -684,6 +830,11 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
 
         if (lit > 0) {
             player.stars += lit;
+            stats.stars += lit;
+            dailyProgress.stars += lit;
+            PersistenceManager.saveDailyProgress(dailyProgress);
+            weeklyProgress.stars += lit;
+            PersistenceManager.saveWeeklyProgress(weeklyProgress);
             gainXP(lit * 3);
             UIManager.updateHUD(player);
             // Broadcast which stars were lit
@@ -691,6 +842,7 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
                 wsClient.sendStarLit(player, litStarIds);
             }
         }
+        checkAchievements();
     } else {
         // Update other player's pulsing state
         const other = others.get(playerId);
@@ -710,6 +862,10 @@ function applyEmoteEffect(playerId: string, emoji: string, x: number, y: number)
     if (isSelf) {
         player.emoting = emoji;
         player.emoteT = 0;
+        stats.emotes++;
+        dailyProgress.emotes++;
+        PersistenceManager.saveDailyProgress(dailyProgress);
+        checkAchievements();
     } else {
         const other = others.get(playerId);
         if (other) {
@@ -876,7 +1032,7 @@ function setupNetworkEventListeners(): void {
     EventBus.on('network:whisper', (data) => {
         // Show incoming whisper
         UIManager.toast(`💬 ${data.fromName}: ${data.text}`, 'whisper');
-        audio.playWhisperReceive?.() || audio.playWhisperSend();
+        audio.playWhisperRecv();
         
         // Show floating text at sender position
         floats.push(new FloatingText(data.x, data.y - 50, `💬 ${data.text}`, 90, 12));
@@ -902,7 +1058,7 @@ function setupNetworkEventListeners(): void {
     // This is the PRIMARY way we receive all entities (players + bots)
     // The server broadcasts this at 20Hz to all clients
     EventBus.on('network:worldState', (data) => {
-        const { entities, litStars, echoes: serverEchoes } = data;
+        const { entities, litStars: _litStars, echoes: serverEchoes } = data;
         
         // Clear and rebuild others map from server entities
         // Keep track of IDs we've seen to remove stale entries
@@ -969,7 +1125,7 @@ function setupNetworkEventListeners(): void {
         if (serverEchoes && serverEchoes.length > 0) {
             for (const e of serverEchoes) {
                 const exists = echoes.some(local =>
-                    local.id === e.id || (Math.abs(local.x - e.x) < 5 && Math.abs(local.y - e.y) < 5)
+                    (Math.abs(local.x - e.x) < 5 && Math.abs(local.y - e.y) < 5)
                 );
                 if (!exists && echoes.length < 100) {
                     echoes.push(new Echo(e.x, e.y, e.text, e.hue || 200, e.name || 'Unknown', e.realm || gameState.currentRealm));
@@ -1009,6 +1165,7 @@ function startGame(): void {
     // Quest timer and daily reset
     setInterval(updateQuestTimer, 1000);
     setInterval(checkDailyReset, 60000);
+    checkWeeklyQuests(); // Check on startup
 
     // === WEBSOCKET CONNECTION (Primary - Real-time sync) ===
     setupNetworkEventListeners();
@@ -1122,7 +1279,7 @@ function render(): void {
     if (Math.random() < 0.01) { // 1% of frames
         console.log(`🎨 Render: ${others.size} others in map, viewRadius: ${viewRadius}, player at (${player.x.toFixed(0)}, ${player.y.toFixed(0)})`);
         if (others.size > 0) {
-            others.forEach((o, id) => {
+            others.forEach((o, _id) => {
                 const dist = Math.hypot(o.x - player.x, o.y - player.y);
                 console.log(`   - ${o.name} at (${o.x.toFixed(0)}, ${o.y.toFixed(0)}), dist: ${dist.toFixed(0)}, visible: ${dist <= viewRadius + 120}`);
             });
@@ -1296,13 +1453,107 @@ function checkDailyReset(): void {
 }
 
 /**
+ * Check weekly quests progress
+ */
+function checkWeeklyQuests(): void {
+    const weekly = PersistenceManager.loadWeeklyProgress();
+    const currentWeek = PersistenceManager.getWeekNumber();
+    
+    if (weekly.week !== currentWeek) {
+        // Reset weekly progress
+        weeklyProgress = {
+            week: currentWeek,
+            whispers: 0,
+            stars: 0,
+            newFriends: 0,
+            realmChanges: 0
+        };
+        PersistenceManager.saveWeeklyProgress(weeklyProgress);
+        console.log('📆 Weekly quests reset!');
+    }
+}
+
+/**
+ * Check for newly unlocked achievements
+ */
+function checkAchievements(): void {
+    const achievements = ACHIEVEMENTS;
+    let newUnlocks = 0;
+    
+    for (const ach of achievements) {
+        if (unlocked.has(ach.id)) continue;
+        
+        let earned = false;
+        
+        // Check requirement based on achievement type
+        switch (ach.id) {
+            case 'firstStar': earned = stats.stars >= 1; break;
+            case 'stargazer': earned = stats.stars >= 25; break;
+            case 'starlight': earned = stats.stars >= 100; break;
+            case 'firstWord': earned = stats.whispers >= 1; break;
+            case 'chatter': earned = stats.whispers >= 50; break;
+            case 'connector': earned = stats.connections >= 10; break;
+            case 'socialite': earned = stats.connections >= 50; break;
+            case 'echomaker': earned = stats.echoes >= 10; break;
+            case 'eternal': earned = stats.echoes >= 50; break;
+            case 'singer': earned = stats.sings >= 25; break;
+            case 'chorus': earned = stats.sings >= 100; break;
+            case 'voyager': earned = visitedRealms.size >= 3; break;
+            case 'explorer': earned = visitedRealms.size >= 5; break;
+            case 'worldWalker': earned = visitedRealms.size >= 8; break;
+            case 'ancient': {
+                const hoursPlayed = (Date.now() - player.born) / (1000 * 60 * 60);
+                earned = hoursPlayed >= 10;
+                break;
+            }
+            case 'level5': earned = GameLogic.getLevel(player.xp) >= 5; break;
+            case 'level10': earned = GameLogic.getLevel(player.xp) >= 10; break;
+            case 'ascended': earned = GameLogic.getLevel(player.xp) >= 11; break;
+            case 'friendMaker': earned = friends.size >= 5; break;
+            case 'popular': earned = friends.size >= 15; break;
+            case 'beloved': earned = friends.size >= 30; break;
+            // Secret achievements
+            case 'nightOwl': {
+                const hour = new Date().getHours();
+                earned = hour >= 2 && hour <= 5;
+                break;
+            }
+            case 'marathon': earned = stats.marathon >= 60; break; // 60 mins continuous
+            case 'constellation': earned = stats.constellation >= 3; break;
+            case 'teleporter': earned = stats.teleports >= 10; break;
+        }
+        
+        if (earned) {
+            unlocked.add(ach.id);
+            newUnlocks++;
+            UIManager.toast(`🏆 Achievement: ${ach.name}!`, 'achievement');
+            gainXP(ach.reward || 10);
+        }
+    }
+    
+    if (newUnlocks > 0) {
+        PersistenceManager.saveAchievements(unlocked);
+        UIManager.updateAchievements();
+    }
+}
+
+/**
  * Save all game progress
  */
 function saveProgress(): void {
     PersistenceManager.saveSettings(settings);
     PersistenceManager.saveStats(stats);
     PersistenceManager.saveDailyProgress(dailyProgress);
+    PersistenceManager.saveWeeklyProgress(weeklyProgress);
     PersistenceManager.saveAchievements(unlocked);
+    PersistenceManager.saveFriends(friends);
+    PersistenceManager.saveVisitedRealms(visitedRealms);
+    PersistenceManager.savePlayerData({
+        name: player.name,
+        xp: player.xp,
+        stars: player.stars,
+        echoes: player.echoes
+    });
 }
 
 // Auto-save progress periodically

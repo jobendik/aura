@@ -1,6 +1,6 @@
 // Rendering system for AURA
 import type { Player, OtherPlayer, Camera, Particle, Star, Echo, Projectile } from '../types';
-import type { Bot } from './entities';
+// Bot type removed - bots are now server-authoritative OtherPlayers
 import { CONFIG, REALMS } from '../core/config';
 
 export class Renderer {
@@ -338,7 +338,7 @@ export class Renderer {
         });
     }
 
-    renderBots(bots: Bot[], player: Player, viewRadius: number): void {
+    renderBots(bots: OtherPlayer[], player: Player, viewRadius: number): void {
         bots.forEach(bot => {
             const dx = bot.x - player.x;
             const dy = bot.y - player.y;

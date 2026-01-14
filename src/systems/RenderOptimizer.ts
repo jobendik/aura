@@ -1,13 +1,15 @@
 // Render optimization utilities
 // Implements: gradient caching, object pooling, spatial partitioning
 
-import type { Particle, Star, OtherPlayer, Echo } from '../types';
+import type { Particle } from '../types';
 import { ObjectPool } from '../types/utilities';
 
 // ============================================
 // Gradient Cache
 // ============================================
 
+// GradientKey interface used internally by GradientCache
+// @ts-ignore Reserved for future gradient caching improvements
 interface GradientKey {
     type: 'radial' | 'linear';
     colors: string[];

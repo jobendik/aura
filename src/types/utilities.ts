@@ -5,9 +5,7 @@ import type {
     OtherPlayer,
     Settings,
     RealmId,
-    NetworkEvent,
-    Star,
-    Echo
+    NetworkEvent
 } from './index';
 
 // ============================================

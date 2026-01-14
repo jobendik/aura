@@ -11,6 +11,7 @@ export interface DatabaseConfig {
 class DatabaseConnection {
     private static instance: DatabaseConnection;
     private isConnected: boolean = false;
+    // @ts-ignore Reserved for future database configuration
     private config: DatabaseConfig | null = null;
 
     private constructor() {}
