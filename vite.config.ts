@@ -25,6 +25,6 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist/client',
-    sourcemap: true,
+    sourcemap: false, // Disabled in production to avoid exposing source code
   },
 });

@@ -219,14 +219,14 @@ export const LitStar: Model<ILitStar> = mongoose.model<ILitStar>('LitStar', LitS
 // ============================================
 
 export interface IPlayer extends Document {
-    odlayerId: string;        // Unique player identifier
+    playerId: string;        // Unique player identifier
     name: string;
     hue: number;
     xp: number;
     level: number;
     stars: number;           // Total stars lit
     echoesCreated: number;   // Total echoes planted
-    whispersent: number;    // Total whispers sent
+    whispersSent: number;    // Total whispers sent
     connections: number;     // Total connections made
     achievements: string[];  // Unlocked achievement IDs
     settings: {
@@ -245,7 +245,7 @@ export interface IPlayer extends Document {
 }
 
 const PlayerSchema = new Schema<IPlayer>({
-    odlayerId: {
+    playerId: {
         type: String,
         required: true,
         unique: true,
@@ -283,7 +283,7 @@ const PlayerSchema = new Schema<IPlayer>({
         default: 0,
         min: 0
     },
-    whispersent: {
+    whispersSent: {
         type: Number,
         default: 0,
         min: 0

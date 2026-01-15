@@ -383,18 +383,18 @@ export class MongoPersistenceService {
      * Get or create player
      */
     async getOrCreatePlayer(playerId: string, name?: string): Promise<PlayerData> {
-        let player: any = await Player.findOne({ odlayerId: playerId }).lean();
+        let player: any = await Player.findOne({ playerId: playerId }).lean();
 
         if (!player) {
             const newPlayer = new Player({
-                odlayerId: playerId,
+                playerId: playerId,
                 name: name || 'Wanderer',
                 hue: Math.floor(Math.random() * 360),
                 xp: 0,
                 level: 1,
                 stars: 0,
                 echoesCreated: 0,
-                whispersent: 0,
+                whispersSent: 0,
                 connections: 0,
                 achievements: [],
                 lastSeen: new Date()
@@ -404,14 +404,14 @@ export class MongoPersistenceService {
         }
 
         return {
-            id: player.odlayerId,
+            id: player.playerId,
             name: player.name,
             hue: player.hue,
             xp: player.xp,
             level: player.level,
             stars: player.stars,
             echoesCreated: player.echoesCreated,
-            whispersSent: player.whispersent,
+            whispersSent: player.whispersSent,
             connections: player.connections,
             achievements: player.achievements,
             settings: player.settings,
@@ -432,7 +432,7 @@ export class MongoPersistenceService {
         if (updates.level !== undefined) updateData.level = updates.level;
         if (updates.stars !== undefined) updateData.stars = updates.stars;
         if (updates.echoesCreated !== undefined) updateData.echoesCreated = updates.echoesCreated;
-        if (updates.whispersSent !== undefined) updateData.whispersent = updates.whispersSent;
+        if (updates.whispersSent !== undefined) updateData.whispersSent = updates.whispersSent;
         if (updates.connections !== undefined) updateData.connections = updates.connections;
         if (updates.achievements !== undefined) updateData.achievements = updates.achievements;
         if (updates.settings !== undefined) updateData.settings = updates.settings;
@@ -440,7 +440,7 @@ export class MongoPersistenceService {
         if (updates.lastPosition !== undefined) updateData.lastPosition = updates.lastPosition;
 
         await Player.findOneAndUpdate(
-            { odlayerId: playerId },
+            { playerId: playerId },
             updateData,
             { upsert: true }
         );
@@ -460,11 +460,11 @@ export class MongoPersistenceService {
         if (stats.xp) inc.xp = stats.xp;
         if (stats.stars) inc.stars = stats.stars;
         if (stats.echoesCreated) inc.echoesCreated = stats.echoesCreated;
-        if (stats.whispersSent) inc.whispersent = stats.whispersSent;
+        if (stats.whispersSent) inc.whispersSent = stats.whispersSent;
         if (stats.connections) inc.connections = stats.connections;
 
         await Player.findOneAndUpdate(
-            { odlayerId: playerId },
+            { playerId: playerId },
             { $inc: inc, lastSeen: new Date() }
         );
     }
@@ -474,7 +474,7 @@ export class MongoPersistenceService {
      */
     async addAchievement(playerId: string, achievementId: string): Promise<void> {
         await Player.findOneAndUpdate(
-            { odlayerId: playerId },
+            { playerId: playerId },
             { $addToSet: { achievements: achievementId } }
         );
     }
@@ -490,14 +490,14 @@ export class MongoPersistenceService {
             .lean();
 
         return players.map((p: any) => ({
-            id: p.odlayerId,
+            id: p.playerId,
             name: p.name,
             hue: p.hue,
             xp: p.xp,
             level: p.level,
             stars: p.stars,
             echoesCreated: p.echoesCreated,
-            whispersSent: p.whispersent,
+            whispersSent: p.whispersSent,
             connections: p.connections,
             achievements: p.achievements
         }));

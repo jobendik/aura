@@ -1,9 +1,26 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
 import { createServer } from 'http';
 import { setupWebSocket } from './websocket/WebSocketHandler';
 import { mongoPersistence } from './services/MongoPersistenceService';
+import { z } from 'zod';
+import {
+    CreateEchoSchema,
+    RealmIdSchema,
+    PlayerIdSchema,
+    PlayerNameSchema,
+    HueSchema,
+    CoordinateSchema,
+    formatZodError
+} from './middleware/validation';
+
+// Generate secure random ID
+function generateId(): string {
+    return crypto.randomBytes(8).toString('hex');
+}
 
 dotenv.config();
 
@@ -17,9 +34,48 @@ const MONGO_DB = process.env.MONGODB_DB || 'aura';
 // @ts-ignore wsHandler manages WebSocket lifecycle
 const wsHandler = setupWebSocket(server);
 
+// CORS configuration - restrict to allowed origins
+const allowedOrigins = [
+    'https://playrift.no',
+    'https://www.playrift.no',
+    'http://localhost:5173',  // Vite dev server
+    'http://localhost:3000'   // Local testing
+];
+
+const corsOptions: cors.CorsOptions = {
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, Postman, etc.)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
+        }
+    },
+    credentials: true
+};
+
+// Rate limiting - prevent spam and DoS
+const generalLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 100, // 100 requests per minute
+    message: { error: 'Too many requests, please try again later' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
+const postLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 minute
+    max: 30, // 30 POST requests per minute
+    message: { error: 'Too many requests, please slow down' },
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
 // Middleware
-app.use(cors());
-app.use(express.json());
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10kb' })); // Limit body size to 10KB
+app.use(generalLimiter);
 
 // In-memory state
 interface PlayerState {
@@ -72,7 +128,7 @@ class Bot {
     realm: string;
 
     constructor(x: number, y: number, realm: string = 'genesis') {
-        this.id = 'bot-' + Math.random().toString(36).substr(2, 9);
+        this.id = 'bot-' + generateId();
         this.x = x;
         this.y = y;
         this.vx = 0;
@@ -194,7 +250,7 @@ app.get('/api/players', (req, res) => {
 });
 
 // Events endpoint - updates player state from client heartbeats/actions
-app.post('/api/events', (req, res) => {
+app.post('/api/events', postLimiter, (req, res) => {
     const event = req.body;
     
     // Debug logging
@@ -299,27 +355,36 @@ app.get('/api/echoes', async (req, res) => {
     }
 });
 
-app.post('/api/echoes', async (req, res) => {
+app.post('/api/echoes', postLimiter, async (req, res) => {
     try {
-        const echoData = req.body;
-        const echoId = Math.random().toString(36).substr(2, 9);
-        
+        // Validate input
+        const parseResult = CreateEchoSchema.safeParse(req.body);
+        if (!parseResult.success) {
+            return res.status(400).json({
+                error: 'Invalid input',
+                details: formatZodError(parseResult.error)
+            });
+        }
+
+        const echoData = parseResult.data;
+        const echoId = generateId();
+
         const newEcho = {
             id: echoId,
             x: echoData.x,
             y: echoData.y,
             text: echoData.text,
-            hue: echoData.hue || 0,
-            name: echoData.name || 'Anonymous',
-            realm: echoData.realm || 'genesis',
+            hue: echoData.hue,
+            name: echoData.name,
+            realm: echoData.realm,
             timestamp: Date.now(),
-            authorId: echoData.authorId || echoData.uid || 'anonymous'
+            authorId: req.body.authorId || req.body.uid || 'anonymous'
         };
 
         if (mongoConnected) {
             await mongoPersistence.createEcho(newEcho);
         }
-        
+
         res.json({ success: true, id: echoId });
     } catch (error) {
         console.error('Error creating echo:', error);
@@ -328,7 +393,7 @@ app.post('/api/echoes', async (req, res) => {
 });
 
 // Vote on an echo
-app.post('/api/echoes/:echoId/vote', async (req, res) => {
+app.post('/api/echoes/:echoId/vote', postLimiter, async (req, res) => {
     try {
         const { echoId } = req.params;
         const { delta } = req.body; // +1 for upvote, -1 for downvote
@@ -367,30 +432,54 @@ app.get('/api/echoes/near', async (req, res) => {
     }
 });
 
-// Messages/Whispers endpoints
-app.post('/api/messages', async (req, res) => {
+// Messages/Whispers endpoints - Validation schema
+const CreateMessageSchema = z.object({
+    fromId: PlayerIdSchema.optional(),
+    uid: PlayerIdSchema.optional(),
+    fromName: PlayerNameSchema.optional(),
+    name: PlayerNameSchema.optional(),
+    toId: PlayerIdSchema.optional(),
+    target: PlayerIdSchema.optional(),
+    toName: PlayerNameSchema.optional(),
+    text: z.string().min(1).max(500),
+    x: CoordinateSchema.optional().default(0),
+    y: CoordinateSchema.optional().default(0),
+    realm: RealmIdSchema.optional().default('genesis'),
+    type: z.enum(['whisper', 'broadcast', 'system']).optional().default('whisper')
+});
+
+app.post('/api/messages', postLimiter, async (req, res) => {
     try {
-        const msgData = req.body;
-        const messageId = Math.random().toString(36).substr(2, 9);
-        
+        // Validate input
+        const parseResult = CreateMessageSchema.safeParse(req.body);
+        if (!parseResult.success) {
+            return res.status(400).json({
+                error: 'Invalid input',
+                details: formatZodError(parseResult.error)
+            });
+        }
+
+        const msgData = parseResult.data;
+        const messageId = generateId();
+
         const newMessage = {
             id: messageId,
-            fromId: msgData.fromId || msgData.uid,
+            fromId: msgData.fromId || msgData.uid || 'anonymous',
             fromName: msgData.fromName || msgData.name || 'Anonymous',
             toId: msgData.toId || msgData.target,
             toName: msgData.toName,
             text: msgData.text,
-            x: msgData.x || 0,
-            y: msgData.y || 0,
-            realm: msgData.realm || 'genesis',
-            type: msgData.type || 'whisper' as const,
+            x: msgData.x,
+            y: msgData.y,
+            realm: msgData.realm,
+            type: msgData.type,
             timestamp: Date.now()
         };
 
         if (mongoConnected) {
             await mongoPersistence.saveMessage(newMessage);
         }
-        
+
         res.json({ success: true, id: messageId });
     } catch (error) {
         console.error('Error saving message:', error);
@@ -472,7 +561,7 @@ app.put('/api/player/:playerId', async (req, res) => {
 });
 
 // Increment player stats
-app.post('/api/player/:playerId/stats', async (req, res) => {
+app.post('/api/player/:playerId/stats', postLimiter, async (req, res) => {
     try {
         const { playerId } = req.params;
         const stats = req.body;
@@ -490,7 +579,7 @@ app.post('/api/player/:playerId/stats', async (req, res) => {
 });
 
 // Add achievement
-app.post('/api/player/:playerId/achievement', async (req, res) => {
+app.post('/api/player/:playerId/achievement', postLimiter, async (req, res) => {
     try {
         const { playerId } = req.params;
         const { achievementId } = req.body;
