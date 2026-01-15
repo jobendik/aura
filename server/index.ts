@@ -47,10 +47,10 @@ const corsOptions: cors.CorsOptions = {
         // Allow requests with no origin (mobile apps, Postman, etc.)
         if (!origin) return callback(null, true);
         if (allowedOrigins.includes(origin)) {
-            callback(null, true);
-        } else {
-            callback(new Error('Not allowed by CORS'));
+            return callback(null, true);
         }
+        // Unknown origins: don't set CORS headers (browser blocks), but no 500 error
+        return callback(null, false);
     },
     credentials: true
 };
