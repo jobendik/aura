@@ -10,13 +10,17 @@
 // 3. Clients RECEIVE state, they don't dictate it (except player input)
 // 4. Bots are 100% server-controlled (ServerBot class)
 // 5. Actions (sing, pulse, emote, echo) are validated server-side
+// 6. XP is calculated SERVER-SIDE only - client cannot manipulate
+// 7. Player data is persisted to MongoDB on disconnect
 //
-// Flow: Client sends input → Server processes → Server broadcasts state
+// Flow: Client sends input → Server validates → Server calculates XP → Server broadcasts state
 // =============================================================================
 
 import { WebSocket, WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'http';
 import type { Server } from 'http';
+import { mongoPersistence } from '../services/MongoPersistenceService';
+import { SHARED_CONFIG, getLevel } from '../../common/constants';
 
 interface PlayerConnection {
     ws: WebSocket;
@@ -28,6 +32,17 @@ interface PlayerConnection {
     name: string;
     hue: number;
     xp: number;
+    stars: number;
+    echoes: number;
+    sings: number;
+    pulses: number;
+    emotes: number;
+    teleports: number;
+    level: number;
+    bonds: Map<string, number>;  // Bond strength to other players/bots (0-100)
+    friends: Set<string>;  // Friend IDs from database
+    achievements: string[];
+    dirty: boolean;  // Needs to be saved to database
 }
 
 interface WebSocketMessage {
@@ -53,6 +68,7 @@ class ServerBot {
     singing: number;
     pulsing: number;
     emoting: string | null;
+    bonds: Map<string, number>;  // Bond strength to players (0-100)
 
     constructor(x: number, y: number, realm: string = 'genesis') {
         this.id = 'bot-' + Math.random().toString(36).substr(2, 9);
@@ -70,6 +86,7 @@ class ServerBot {
         this.singing = 0;
         this.pulsing = 0;
         this.emoting = null;
+        this.bonds = new Map();
     }
 
     update(): void {
@@ -134,25 +151,58 @@ export class WebSocketHandler {
     private cleanupInterval: NodeJS.Timeout | null = null;
     // @ts-ignore Used for cleanup on shutdown
     private gameLoopInterval: NodeJS.Timeout | null = null;
-    
+    private saveInterval: NodeJS.Timeout | null = null;
+
     // Server-authoritative bots
     private bots: Map<string, ServerBot> = new Map();
     private readonly MIN_POPULATION = 3;
-    
+
     // Server-authoritative state
     private litStars: Set<string> = new Set();
     private echoes: Map<string, any> = new Map();
-    
+
     // Timeout for considering a player disconnected (30 seconds)
     private readonly PLAYER_TIMEOUT = 30000;
     private readonly CLEANUP_INTERVAL = 10000;
     private readonly GAME_TICK_RATE = 50; // 20Hz server tick
+    private readonly SAVE_INTERVAL = 30000; // Save dirty players every 30 seconds
+
+    // Bond system constants
+    private readonly BOND_DECAY_RATE = 0.03;  // Per tick (20Hz = ~0.6/sec)
+    private readonly BOND_WHISPER_GAIN = 12;  // Per whisper hit
+    private readonly BOND_SING_GAIN = 8;      // Per sing near
+    private readonly BOND_PULSE_GAIN = 5;     // Per pulse near
+    private readonly BOND_THRESHOLD_NOTIFY = 25;  // Notify when bond crosses this
+
+    // XP reward constants (server-authoritative)
+    private readonly XP_STAR_LIT = SHARED_CONFIG.XP_STAR_LIT;
+    private readonly XP_ECHO_PLANTED = SHARED_CONFIG.XP_ECHO_PLANTED;
+    private readonly XP_WHISPER_SENT = SHARED_CONFIG.XP_WHISPER_SENT;
+    private readonly XP_SING = 2;
+    private readonly XP_PULSE = 1;
+    private readonly XP_EMOTE = 1;
+    private readonly XP_CONNECTION_MADE = 10;
+
+    // Action cooldowns (in ms) to prevent spam
+    private readonly COOLDOWN_SING = 2000;
+    private readonly COOLDOWN_PULSE = 1500;
+    private readonly COOLDOWN_ECHO = 5000;
+    private readonly COOLDOWN_EMOTE = 1000;
+    private actionCooldowns: Map<string, Map<string, number>> = new Map();
+
+    // Rate limiting for WebSocket messages
+    private readonly MESSAGE_RATE_LIMIT = 50; // Max messages per second
+    private readonly MESSAGE_RATE_WINDOW = 1000; // 1 second window
+    private messageRateLimits: Map<string, { count: number; windowStart: number }> = new Map();
+
+    // Player movement bounds
+    private readonly MAX_COORDINATE = 50000; // Maximum allowed coordinate value
 
     /**
      * Initialize WebSocket server
      */
     init(server: Server): void {
-        this.wss = new WebSocketServer({ 
+        this.wss = new WebSocketServer({
             server,
             path: '/ws'
         });
@@ -171,8 +221,183 @@ export class WebSocketHandler {
             this.serverGameTick();
         }, this.GAME_TICK_RATE);
 
+        // Start periodic save of dirty player data
+        this.saveInterval = setInterval(() => {
+            this.saveDirtyPlayers();
+        }, this.SAVE_INTERVAL);
+
+        // Load persisted data on startup
+        this.loadPersistedData();
+
         console.log('🔌 WebSocket server initialized');
         console.log('🎮 Server game loop running at 20Hz');
+        console.log('💾 Player persistence enabled');
+    }
+
+    /**
+     * Load persisted stars and echoes from database
+     */
+    private async loadPersistedData(): Promise<void> {
+        try {
+            if (mongoPersistence.isReady()) {
+                // Load lit stars for all realms
+                const stars = await mongoPersistence.getLitStars();
+                for (const starId of stars) {
+                    this.litStars.add(starId);
+                }
+                console.log(`✨ Loaded ${this.litStars.size} lit stars from database`);
+
+                // Load echoes for each realm
+                const realms = ['genesis', 'nebula', 'void', 'starforge', 'sanctuary'];
+                for (const realm of realms) {
+                    const realmEchoes = await mongoPersistence.getEchoes(realm, 200);
+                    for (const echo of realmEchoes) {
+                        this.echoes.set(echo.id, echo);
+                    }
+                }
+                console.log(`📢 Loaded ${this.echoes.size} echoes from database`);
+            }
+        } catch (error) {
+            console.error('Failed to load persisted data:', error);
+        }
+    }
+
+    /**
+     * Save all players marked as dirty to database
+     */
+    private async saveDirtyPlayers(): Promise<void> {
+        if (!mongoPersistence.isReady()) return;
+
+        for (const conn of this.connections.values()) {
+            if (conn.dirty) {
+                try {
+                    await mongoPersistence.updatePlayer(conn.playerId, {
+                        name: conn.name,
+                        hue: conn.hue,
+                        xp: conn.xp,
+                        level: conn.level,
+                        stars: conn.stars,
+                        echoesCreated: conn.echoes,
+                        sings: conn.sings,
+                        pulses: conn.pulses,
+                        emotes: conn.emotes,
+                        teleports: conn.teleports,
+                        lastRealm: conn.realm,
+                        lastPosition: { x: conn.x, y: conn.y }
+                    });
+                    conn.dirty = false;
+                } catch (error) {
+                    console.error(`Failed to save player ${conn.playerId}:`, error);
+                }
+            }
+        }
+    }
+
+    /**
+     * Validate player ID format
+     */
+    private isValidPlayerId(playerId: string): boolean {
+        // Must be 5-50 chars, alphanumeric with hyphens allowed
+        if (playerId.length < 5 || playerId.length > 50) return false;
+        // Only allow safe characters
+        if (!/^[a-zA-Z0-9\-_]+$/.test(playerId)) return false;
+        return true;
+    }
+
+    /**
+     * Validate star ID format
+     */
+    private isValidStarId(starId: string): boolean {
+        // Star IDs should match format: realm:cellX,cellY:index or realm:cellX:cellY:index
+        if (starId.length > 100) return false;
+        // Must start with a valid realm name
+        const validRealms = ['genesis', 'nebula', 'void', 'starforge', 'sanctuary'];
+        const parts = starId.split(':');
+        if (parts.length < 2) return false;
+        if (!validRealms.includes(parts[0])) return false;
+        // Only allow safe characters
+        if (!/^[a-zA-Z0-9:,\-_]+$/.test(starId)) return false;
+        return true;
+    }
+
+    /**
+     * Sanitize text content to prevent XSS
+     */
+    private sanitizeText(text: string, maxLength: number): string {
+        return text
+            .trim()
+            .substring(0, maxLength)
+            .replace(/[<>&"'`]/g, '') // Remove HTML-sensitive chars
+            .replace(/[\x00-\x1F\x7F]/g, ''); // Remove control chars
+    }
+
+    /**
+     * Check if action is on cooldown
+     */
+    private isOnCooldown(playerId: string, action: string, cooldownMs: number): boolean {
+        const now = Date.now();
+        let playerCooldowns = this.actionCooldowns.get(playerId);
+        if (!playerCooldowns) {
+            playerCooldowns = new Map();
+            this.actionCooldowns.set(playerId, playerCooldowns);
+        }
+
+        const lastAction = playerCooldowns.get(action) || 0;
+        if (now - lastAction < cooldownMs) {
+            return true;
+        }
+
+        playerCooldowns.set(action, now);
+        return false;
+    }
+
+    /**
+     * Send cooldown error to client
+     */
+    private sendCooldownError(connection: PlayerConnection, action: string, cooldownMs: number): void {
+        if (connection.ws.readyState === WebSocket.OPEN) {
+            const playerCooldowns = this.actionCooldowns.get(connection.playerId);
+            const lastAction = playerCooldowns?.get(action) || 0;
+            const remaining = Math.max(0, cooldownMs - (Date.now() - lastAction));
+            
+            this.send(connection.ws, {
+                type: 'cooldown',
+                data: {
+                    action,
+                    remainingMs: remaining
+                },
+                timestamp: Date.now()
+            });
+        }
+    }
+
+    /**
+     * Award XP to a player (server-authoritative)
+     */
+    private awardXP(connection: PlayerConnection, amount: number, reason: string): void {
+        const oldLevel = connection.level;
+        connection.xp += amount;
+        connection.level = getLevel(connection.xp);
+        connection.dirty = true;
+
+        // Send XP gain notification to player
+        if (connection.ws.readyState === WebSocket.OPEN) {
+            this.send(connection.ws, {
+                type: 'xp_gain',
+                data: {
+                    amount,
+                    reason,
+                    newXp: connection.xp,
+                    newLevel: connection.level,
+                    leveledUp: connection.level > oldLevel
+                },
+                timestamp: Date.now()
+            });
+        }
+
+        if (connection.level > oldLevel) {
+            console.log(`⬆️ ${connection.name} leveled up to ${connection.level}!`);
+        }
     }
 
     /**
@@ -181,10 +406,25 @@ export class WebSocketHandler {
     private serverGameTick(): void {
         // Manage bot population per realm
         this.manageBotPopulation();
-        
+
+        // Decay all player bonds
+        this.decayAllPlayerBonds();
+
+        // Build player position map for social gravity
+        const playerPositions = new Map<string, { x: number; y: number }>();
+        for (const conn of this.connections.values()) {
+            playerPositions.set(conn.playerId, { x: conn.x, y: conn.y });
+        }
+
         // Update all bots
         for (const bot of this.bots.values()) {
             bot.update();
+
+            // Decay bot bonds
+            this.decayBotBonds(bot);
+
+            // Apply social gravity - pull bots toward bonded players
+            this.applyBotSocialGravity(bot, playerPositions);
         }
 
         // Broadcast world state to all connected clients
@@ -192,11 +432,164 @@ export class WebSocketHandler {
     }
 
     /**
+     * Decay all player-to-player bonds over time
+     */
+    private decayAllPlayerBonds(): void {
+        for (const conn of this.connections.values()) {
+            for (const [targetId, strength] of conn.bonds.entries()) {
+                const newStrength = strength - this.BOND_DECAY_RATE;
+                if (newStrength <= 0) {
+                    conn.bonds.delete(targetId);
+                } else {
+                    conn.bonds.set(targetId, newStrength);
+                }
+            }
+        }
+    }
+
+    /**
+     * Decay bot bonds over time
+     */
+    private decayBotBonds(bot: ServerBot): void {
+        for (const [playerId, strength] of bot.bonds.entries()) {
+            const newStrength = strength - this.BOND_DECAY_RATE;
+            if (newStrength <= 0) {
+                bot.bonds.delete(playerId);
+            } else {
+                bot.bonds.set(playerId, newStrength);
+            }
+        }
+    }
+
+    /**
+     * Apply social gravity - pull bot toward strongly bonded players
+     */
+    private applyBotSocialGravity(bot: ServerBot, playerPositions: Map<string, { x: number; y: number }>): void {
+        for (const [playerId, strength] of bot.bonds.entries()) {
+            if (strength < 20) continue; // Only apply for notable bonds
+
+            const playerPos = playerPositions.get(playerId);
+            if (!playerPos) continue;
+
+            const dx = playerPos.x - bot.x;
+            const dy = playerPos.y - bot.y;
+            const dist = Math.hypot(dx, dy);
+
+            // Don't pull if already close or too far
+            if (dist < 80 || dist > 600) continue;
+
+            // Apply gentle pull toward bonded player
+            const force = (strength / 100) * 0.003;
+            bot.vx += (dx / dist) * force * dist;
+            bot.vy += (dy / dist) * force * dist;
+        }
+    }
+
+    /**
+     * Strengthen bond between two players
+     * @returns true if bond crossed the notification threshold
+     */
+    private strengthenPlayerBond(fromId: string, toId: string, amount: number): boolean {
+        const fromConn = this.connections.get(fromId);
+        if (!fromConn) return false;
+
+        const previousStrength = fromConn.bonds.get(toId) || 0;
+        const newStrength = Math.min(100, previousStrength + amount);
+        fromConn.bonds.set(toId, newStrength);
+
+        if (Math.random() < 0.05) console.log(`Bond strengthened: ${fromId} -> ${toId} = ${newStrength.toFixed(1)}`);
+
+        // Return true if we just crossed the notification threshold
+        return previousStrength < this.BOND_THRESHOLD_NOTIFY && newStrength >= this.BOND_THRESHOLD_NOTIFY;
+    }
+
+    /**
+     * Strengthen bond between player and bot
+     */
+    private strengthenBotBond(bot: ServerBot, playerId: string, amount: number): void {
+        const currentBond = bot.bonds.get(playerId) || 0;
+        bot.bonds.set(playerId, Math.min(100, currentBond + amount));
+    }
+
+    /**
+     * Strengthen bonds between a player and all nearby players and bots
+     */
+    private strengthenNearbyBonds(sender: PlayerConnection, amount: number, range: number): void {
+        // Strengthen bonds with nearby players
+        for (const conn of this.connections.values()) {
+            if (conn.playerId === sender.playerId) continue;
+            if (conn.realm !== sender.realm) continue;
+
+            const dist = Math.hypot(conn.x - sender.x, conn.y - sender.y);
+            if (dist <= range) {
+                // Bond gain scales with proximity
+                const proximityFactor = 1 - (dist / range) * 0.5;
+                const scaledAmount = amount * proximityFactor;
+
+                // Strengthen both ways
+                const crossedThreshold = this.strengthenPlayerBond(sender.playerId, conn.playerId, scaledAmount);
+                this.strengthenPlayerBond(conn.playerId, sender.playerId, scaledAmount);
+
+                // Notify if bond just became significant
+                if (crossedThreshold) {
+                    this.notifyConnectionMade(sender, conn);
+                }
+            }
+        }
+
+        // Strengthen bonds with nearby bots
+        for (const bot of this.bots.values()) {
+            if (bot.realm !== sender.realm) continue;
+
+            const dist = Math.hypot(bot.x - sender.x, bot.y - sender.y);
+            if (dist <= range) {
+                const proximityFactor = 1 - (dist / range) * 0.5;
+                this.strengthenBotBond(bot, sender.playerId, amount * proximityFactor);
+            }
+        }
+    }
+
+    /**
+     * Notify both players when a significant connection is made
+     */
+    private notifyConnectionMade(player1: PlayerConnection, player2: PlayerConnection): void {
+        const eventData = {
+            type: 'connection_made',
+            data: {
+                player1Id: player1.playerId,
+                player1Name: player1.name,
+                player2Id: player2.playerId,
+                player2Name: player2.name
+            },
+            timestamp: Date.now()
+        };
+
+        if (player1.ws.readyState === WebSocket.OPEN) {
+            this.send(player1.ws, eventData);
+        }
+        if (player2.ws.readyState === WebSocket.OPEN) {
+            this.send(player2.ws, eventData);
+        }
+
+        // Award XP for making a connection (server-authoritative)
+        this.awardXP(player1, this.XP_CONNECTION_MADE, 'connection');
+        this.awardXP(player2, this.XP_CONNECTION_MADE, 'connection');
+
+        // Increment stats
+        if (mongoPersistence.isReady()) {
+            mongoPersistence.incrementPlayerStats(player1.playerId, { connections: 1 }).catch(() => {});
+            mongoPersistence.incrementPlayerStats(player2.playerId, { connections: 1 }).catch(() => {});
+        }
+
+        console.log(`🔗 Connection made: ${player1.name} <-> ${player2.name}`);
+    }
+
+    /**
      * Manage bot population (server-authoritative)
      */
     private manageBotPopulation(): void {
         const realms = ['genesis', 'nebula', 'void', 'starforge', 'sanctuary'];
-        
+
         for (const realm of realms) {
             const playersInRealm = Array.from(this.connections.values()).filter(c => c.realm === realm).length;
             const botsInRealm = Array.from(this.bots.values()).filter(b => b.realm === realm).length;
@@ -241,42 +634,66 @@ export class WebSocketHandler {
 
         // Broadcast to each realm
         for (const [realm, connections] of realmConnections) {
-            // Get all players in this realm
-            const players = connections.map(c => ({
-                id: c.playerId,
-                name: c.name || 'Wanderer',
-                x: c.x,
-                y: c.y,
-                hue: c.hue || 200,
-                xp: c.xp || 0,
-                isBot: false
-            }));
-
             // Get all bots in this realm
-            const realmBots = Array.from(this.bots.values())
-                .filter(b => b.realm === realm)
-                .map(b => b.toPlayerData());
+            const realmBots = Array.from(this.bots.values()).filter(b => b.realm === realm);
 
-            // Combine all entities
-            const allEntities = [...players, ...realmBots];
+            // Broadcast personalized world state to each player (includes bond data)
+            for (const viewerConn of connections) {
+                if (viewerConn.ws.readyState !== WebSocket.OPEN) continue;
 
-            // Broadcast to all players in this realm
-            const worldState = {
-                type: 'world_state',
-                data: {
-                    entities: allEntities,
-                    litStars: Array.from(this.litStars).filter(s => s.startsWith(realm)),
+                // Build player entities with bond info
+                const players = connections.map(c => ({
+                    id: c.playerId,
+                    name: c.name || 'Wanderer',
+                    x: c.x,
+                    y: c.y,
+                    hue: c.hue || 200,
+                    xp: c.xp || 0,
+                    isBot: false,
+                    bondToViewer: viewerConn.bonds.get(c.playerId) || 0
+                }));
+
+                // Build bot entities with bond info
+                const botEntities = realmBots.map(b => ({
+                    ...b.toPlayerData(),
+                    bondToViewer: b.bonds.get(viewerConn.playerId) || 0
+                }));
+
+                // Combine all entities
+                const allEntities = [...players, ...botEntities];
+
+                // World state with bond data and cluster count
+                const linkedCount = this.getLinkedCount(viewerConn);
+
+                // Include echoes in world state broadcast (so new players see them)
+                const realmEchoes = Array.from(this.echoes.values()).filter(e => e.realm === realm);
+
+                const worldState = {
+                    type: 'world_state',
+                    data: {
+                        entities: allEntities,
+                        litStars: Array.from(this.litStars).filter(s => s.startsWith(realm)),
+                        echoes: realmEchoes,  // Include echoes in every broadcast
+                        linkedCount,  // Number of significant connections
+                        timestamp: Date.now()
+                    },
                     timestamp: Date.now()
-                },
-                timestamp: Date.now()
-            };
+                };
 
-            for (const conn of connections) {
-                if (conn.ws.readyState === WebSocket.OPEN) {
-                    this.send(conn.ws, worldState);
-                }
+                this.send(viewerConn.ws, worldState);
             }
         }
+    }
+
+    /**
+     * Get count of significant connections for a player
+     */
+    private getLinkedCount(conn: PlayerConnection): number {
+        let count = 0;
+        for (const strength of conn.bonds.values()) {
+            if (strength >= this.BOND_THRESHOLD_NOTIFY) count++;
+        }
+        return count;
     }
 
     /**
@@ -292,21 +709,45 @@ export class WebSocketHandler {
             return;
         }
 
-        console.log(`🔌 Player connected: ${playerId} in realm: ${realm}`);
+        // Validate player ID format and length
+        if (!this.isValidPlayerId(playerId)) {
+            ws.close(4001, 'Invalid player ID format');
+            return;
+        }
 
-        // Store connection
+        // Validate realm
+        const validRealms = ['genesis', 'nebula', 'void', 'starforge', 'sanctuary'];
+        const validatedRealm = validRealms.includes(realm) ? realm : 'genesis';
+
+        console.log(`🔌 Player connected: ${playerId} in realm: ${validatedRealm}`);
+
+        // Create connection with defaults, then load from DB
         const connection: PlayerConnection = {
             ws,
             playerId,
-            realm,
+            realm: validatedRealm,
             lastSeen: Date.now(),
             x: 0,
             y: 0,
             name: 'Wanderer',
             hue: 200,
-            xp: 0
+            xp: 0,
+            stars: 0,
+            echoes: 0,
+            sings: 0,
+            pulses: 0,
+            emotes: 0,
+            teleports: 0,
+            level: 1,
+            bonds: new Map(),
+            friends: new Set(),
+            achievements: [],
+            dirty: false
         };
         this.connections.set(playerId, connection);
+
+        // Load player data from database asynchronously
+        this.loadPlayerData(playerId, connection);
 
         // Notify other players in same realm
         this.broadcastToRealm(realm, {
@@ -340,6 +781,61 @@ export class WebSocketHandler {
                 conn.lastSeen = Date.now();
             }
         });
+    }
+
+    /**
+     * Load player data from database
+     */
+    private async loadPlayerData(playerId: string, connection: PlayerConnection): Promise<void> {
+        try {
+            if (!mongoPersistence.isReady()) return;
+
+            const playerData = await mongoPersistence.getOrCreatePlayer(playerId, connection.name);
+            connection.name = playerData.name;
+            connection.hue = playerData.hue;
+            connection.xp = playerData.xp;
+            connection.level = playerData.level;
+            connection.stars = playerData.stars;
+            connection.echoes = playerData.echoesCreated;
+            connection.sings = playerData.sings || 0;
+            connection.pulses = playerData.pulses || 0;
+            connection.emotes = playerData.emotes || 0;
+            connection.teleports = playerData.teleports || 0;
+            connection.achievements = playerData.achievements || [];
+
+            // Load friends
+            const friends = await mongoPersistence.getFriends(playerId);
+            connection.friends = new Set(friends.map(f => f.friendId));
+
+            // Send player data to client (including stats for achievements)
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'player_data',
+                    data: {
+                        id: playerId,
+                        name: playerData.name,
+                        hue: playerData.hue,
+                        xp: playerData.xp,
+                        level: playerData.level,
+                        stars: playerData.stars,
+                        echoes: playerData.echoesCreated,
+                        sings: playerData.sings || 0,
+                        pulses: playerData.pulses || 0,
+                        emotes: playerData.emotes || 0,
+                        teleports: playerData.teleports || 0,
+                        achievements: playerData.achievements,
+                        friends: friends.map(f => ({ id: f.friendId, name: f.friendName })),
+                        lastRealm: playerData.lastRealm,
+                        lastPosition: playerData.lastPosition
+                    },
+                    timestamp: Date.now()
+                });
+            }
+
+            console.log(`📂 Loaded player data for ${playerData.name} (Level ${playerData.level})`);
+        } catch (error) {
+            console.error(`Failed to load player data for ${playerId}:`, error);
+        }
     }
 
     /**
@@ -378,15 +874,42 @@ export class WebSocketHandler {
     }
 
     /**
+     * Check if player is rate limited
+     */
+    private isRateLimited(playerId: string): boolean {
+        const now = Date.now();
+        let rateData = this.messageRateLimits.get(playerId);
+        
+        if (!rateData || now - rateData.windowStart > this.MESSAGE_RATE_WINDOW) {
+            // New window
+            this.messageRateLimits.set(playerId, { count: 1, windowStart: now });
+            return false;
+        }
+        
+        rateData.count++;
+        if (rateData.count > this.MESSAGE_RATE_LIMIT) {
+            console.warn(`⚠️ Rate limiting player ${playerId}: ${rateData.count} msgs in ${this.MESSAGE_RATE_WINDOW}ms`);
+            return true;
+        }
+        
+        return false;
+    }
+
+    /**
      * Handle incoming message from client
      */
     private handleMessage(playerId: string, rawData: string): void {
         try {
+            // Rate limiting check
+            if (this.isRateLimited(playerId)) {
+                return; // Drop message silently
+            }
+
             const message: WebSocketMessage = JSON.parse(rawData);
             const connection = this.connections.get(playerId);
-            
+
             if (!connection) return;
-            
+
             connection.lastSeen = Date.now();
 
             switch (message.type) {
@@ -411,6 +934,18 @@ export class WebSocketHandler {
                 case 'star_lit':
                     this.handleStarLit(connection, message.data);
                     break;
+                case 'add_friend':
+                    this.handleAddFriend(connection, message.data);
+                    break;
+                case 'remove_friend':
+                    this.handleRemoveFriend(connection, message.data);
+                    break;
+                case 'teleport_to_friend':
+                    this.handleTeleportToFriend(connection, message.data);
+                    break;
+                case 'voice_signal':
+                    this.handleVoiceSignal(connection, message.data);
+                    break;
                 case 'ping':
                     // Respond to ping
                     this.send(connection.ws, { type: 'pong', data: {}, timestamp: Date.now() });
@@ -426,31 +961,49 @@ export class WebSocketHandler {
      */
     private handlePlayerUpdate(playerId: string, connection: PlayerConnection, data: any): void {
         // Update stored position and data
-        if (typeof data.x === 'number') connection.x = data.x;
-        if (typeof data.y === 'number') connection.y = data.y;
-        if (typeof data.name === 'string') connection.name = data.name;
-        if (typeof data.hue === 'number') connection.hue = data.hue;
-        if (typeof data.xp === 'number') connection.xp = data.xp;
+        // Bounds check and clamp coordinates
+        if (typeof data.x === 'number') {
+            connection.x = Math.max(-this.MAX_COORDINATE, Math.min(this.MAX_COORDINATE, data.x));
+        }
+        if (typeof data.y === 'number') {
+            connection.y = Math.max(-this.MAX_COORDINATE, Math.min(this.MAX_COORDINATE, data.y));
+        }
         
+        // Validate and sanitize player name
+        if (typeof data.name === 'string') {
+            const sanitizedName = this.sanitizePlayerName(data.name);
+            if (sanitizedName) {
+                connection.name = sanitizedName;
+            }
+        }
+        
+        if (typeof data.hue === 'number') connection.hue = Math.max(0, Math.min(360, data.hue));
+        // Note: XP is now server-authoritative, ignore client-sent XP
+        // if (typeof data.xp === 'number') connection.xp = data.xp;
+
         // Handle realm change
         if (data.realmChange && data.realm !== connection.realm) {
+            // Validate realm
+            const validRealms = ['genesis', 'nebula', 'void', 'starforge', 'sanctuary'];
+            if (!validRealms.includes(data.realm)) return;
+            
             const oldRealm = connection.realm;
             connection.realm = data.realm;
-            
+
             // Notify old realm of departure
             this.broadcastToRealm(oldRealm, {
                 type: 'player_leave',
                 data: { playerId },
                 timestamp: Date.now()
             }, playerId);
-            
+
             // Notify new realm of arrival
             this.broadcastToRealm(data.realm, {
                 type: 'player_joined',
                 data: { playerId },
                 timestamp: Date.now()
             }, playerId);
-            
+
             // Send current world state to player entering new realm
             this.sendInitialWorldState(connection.ws, data.realm, playerId);
         }
@@ -460,22 +1013,68 @@ export class WebSocketHandler {
     }
 
     /**
+     * Sanitize player name to prevent XSS and enforce limits
+     */
+    private sanitizePlayerName(name: string): string | null {
+        // Trim and limit length
+        let sanitized = name.trim().substring(0, SHARED_CONFIG.MAX_PLAYER_NAME);
+        
+        // Remove potentially dangerous characters (HTML/script injection)
+        sanitized = sanitized.replace(/[<>&"'`]/g, '');
+        
+        // Remove control characters
+        sanitized = sanitized.replace(/[\x00-\x1F\x7F]/g, '');
+        
+        // Must have at least 1 visible character
+        if (sanitized.length === 0) {
+            return null;
+        }
+        
+        return sanitized;
+    }
+
+    /**
      * Handle whisper message
      */
     private handleWhisper(connection: PlayerConnection, data: any): void {
+        // Validate and sanitize whisper text
+        const text = this.sanitizeText(data.text || '', SHARED_CONFIG.MAX_WHISPER_LENGTH);
+        if (!text) return;
+
+        // Track whispers sent stat
+        // Note: We don't have whispersSent in PlayerConnection, update in DB directly
+        if (mongoPersistence.isReady()) {
+            mongoPersistence.incrementPlayerStats(connection.playerId, { whispersSent: 1 }).catch(() => {});
+        }
+
+        // Award XP for sending whisper (server-authoritative)
+        this.awardXP(connection, this.XP_WHISPER_SENT, 'whisper');
+        connection.dirty = true;
+
         if (data.targetId) {
-            // Direct whisper to specific player
+            // Direct whisper to specific player - strong bond gain
             const target = this.connections.get(data.targetId);
             if (target && target.ws.readyState === WebSocket.OPEN) {
                 this.send(target.ws, {
                     type: 'whisper',
-                    data,
+                    data: { ...data, text },
                     timestamp: Date.now()
                 });
+
+                // Strengthen bond with target (both ways)
+                const crossedThreshold = this.strengthenPlayerBond(connection.playerId, data.targetId, this.BOND_WHISPER_GAIN);
+                this.strengthenPlayerBond(data.targetId, connection.playerId, this.BOND_WHISPER_GAIN);
+
+                if (crossedThreshold) {
+                    this.notifyConnectionMade(connection, target);
+                }
             }
         } else {
             // Broadcast whisper to nearby players (within range)
-            this.broadcastToNearby(connection, data, 'whisper', 500);
+            this.broadcastToNearby(connection, { ...data, text }, 'whisper', 500);
+
+            // Strengthen bonds with nearby players and bots
+            this.strengthenNearbyBonds(connection, this.BOND_WHISPER_GAIN * 0.5, 200);
         }
     }
 
@@ -483,6 +1082,19 @@ export class WebSocketHandler {
      * Handle sing action - broadcast to ALL players including sender (server-authoritative)
      */
     private handleSing(connection: PlayerConnection, data: any): void {
+        // Check cooldown
+        if (this.isOnCooldown(connection.playerId, 'sing', this.COOLDOWN_SING)) {
+            this.sendCooldownError(connection, 'sing', this.COOLDOWN_SING);
+            return;
+        }
+
+        // Track stats
+        connection.sings++;
+        connection.dirty = true;
+
+        // Award XP (server-authoritative)
+        this.awardXP(connection, this.XP_SING, 'sing');
+
         // Broadcast to ALL players in realm INCLUDING sender
         this.broadcastToRealmAll(connection.realm, {
             type: 'sing',
@@ -492,12 +1104,28 @@ export class WebSocketHandler {
             },
             timestamp: Date.now()
         });
+
+        // Strengthen bonds with nearby players and bots (singing has wider range)
+        this.strengthenNearbyBonds(connection, this.BOND_SING_GAIN, 300);
     }
 
     /**
      * Handle pulse action - broadcast to ALL players including sender (server-authoritative)
      */
     private handlePulse(connection: PlayerConnection, data: any): void {
+        // Check cooldown
+        if (this.isOnCooldown(connection.playerId, 'pulse', this.COOLDOWN_PULSE)) {
+            this.sendCooldownError(connection, 'pulse', this.COOLDOWN_PULSE);
+            return;
+        }
+
+        // Track stats
+        connection.pulses++;
+        connection.dirty = true;
+
+        // Award XP (server-authoritative)
+        this.awardXP(connection, this.XP_PULSE, 'pulse');
+
         // Broadcast to ALL players in realm INCLUDING sender
         this.broadcastToRealmAll(connection.realm, {
             type: 'pulse',
@@ -507,12 +1135,28 @@ export class WebSocketHandler {
             },
             timestamp: Date.now()
         });
+
+        // Strengthen bonds with nearby players and bots (medium range)
+        this.strengthenNearbyBonds(connection, this.BOND_PULSE_GAIN, 250);
     }
 
     /**
      * Handle emote action - broadcast to ALL players including sender (server-authoritative)
      */
     private handleEmote(connection: PlayerConnection, data: any): void {
+        // Check cooldown
+        if (this.isOnCooldown(connection.playerId, 'emote', this.COOLDOWN_EMOTE)) {
+            this.sendCooldownError(connection, 'emote', this.COOLDOWN_EMOTE);
+            return;
+        }
+
+        // Track stats
+        connection.emotes++;
+        connection.dirty = true;
+
+        // Award XP (server-authoritative)
+        this.awardXP(connection, this.XP_EMOTE, 'emote');
+
         // Broadcast to ALL players in realm INCLUDING sender
         this.broadcastToRealmAll(connection.realm, {
             type: 'emote',
@@ -528,11 +1172,113 @@ export class WebSocketHandler {
      * Handle echo creation - broadcast to ALL players including sender (server-authoritative)
      */
     private handleEcho(connection: PlayerConnection, data: any): void {
+        // Check cooldown
+        if (this.isOnCooldown(connection.playerId, 'echo', this.COOLDOWN_ECHO)) {
+            this.sendCooldownError(connection, 'echo', this.COOLDOWN_ECHO);
+            return;
+        }
+
+        // Check echo count limit per realm
+        const realmEchoCount = Array.from(this.echoes.values()).filter(e => e.realm === connection.realm).length;
+        if (realmEchoCount >= SHARED_CONFIG.MAX_ECHOES_PER_REALM) {
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'error',
+                    data: { message: 'This realm has reached its echo limit' },
+                    timestamp: Date.now()
+                });
+            }
+            return;
+        }
+
+        // Validate and sanitize echo text (XSS prevention)
+        const text = this.sanitizeText(data.text || '', SHARED_CONFIG.MAX_ECHO_LENGTH);
+        if (!text) return;
+
+        // Generate echo ID
+        const echoId = `echo-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
+        // Store echo in memory
+        const echo = {
+            id: echoId,
+            x: connection.x,
+            y: connection.y,
+            text,
+            hue: connection.hue,
+            name: connection.name,
+            realm: connection.realm,
+            timestamp: Date.now(),
+            authorId: connection.playerId
+        };
+        this.echoes.set(echoId, echo);
+
+        // Persist to database
+        if (mongoPersistence.isReady()) {
+            mongoPersistence.createEcho(echo).catch(err => {
+                console.error('Failed to persist echo:', err);
+            });
+        }
+
+        // Award XP and increment counter (server-authoritative)
+        connection.echoes++;
+        connection.dirty = true;
+        this.awardXP(connection, this.XP_ECHO_PLANTED, 'echo');
+
         // Broadcast to ALL players in realm INCLUDING sender
         this.broadcastToRealmAll(connection.realm, {
             type: 'echo',
             data: {
                 ...data,
+                text,
+                playerId: connection.playerId,
+                echoId
+            },
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * Handle star lit event - PERSIST and broadcast to ALL players including sender (server-authoritative)
+     */
+    private handleStarLit(connection: PlayerConnection, data: any): void {
+        const starIds: string[] = data.starIds || [];
+        if (starIds.length === 0) return;
+
+        // Validate and filter star IDs
+        const validStarIds = starIds.filter(id => this.isValidStarId(id));
+        if (validStarIds.length === 0) return;
+
+        // Limit batch size to prevent abuse
+        const limitedStarIds = validStarIds.slice(0, 50);
+
+        // Filter to only stars not already lit
+        const newStars = limitedStarIds.filter(id => !this.litStars.has(id));
+        if (newStars.length === 0) return;
+
+        // Add to in-memory set
+        for (const starId of newStars) {
+            this.litStars.add(starId);
+        }
+
+        // Persist to database
+        if (mongoPersistence.isReady()) {
+            mongoPersistence.litStarsBatch(newStars, connection.realm, connection.playerId).catch(err => {
+                console.error('Failed to persist lit stars:', err);
+            });
+        }
+
+        // Award XP for stars lit (server-authoritative)
+        const xpGain = newStars.length * this.XP_STAR_LIT;
+        connection.stars += newStars.length;
+        connection.dirty = true;
+        this.awardXP(connection, xpGain, 'stars_lit');
+
+        // Broadcast to ALL players in realm INCLUDING sender
+        this.broadcastToRealmAll(connection.realm, {
+            type: 'star_lit',
+            data: {
+                ...data,
+                starIds: newStars,  // Only broadcast newly lit stars
                 playerId: connection.playerId
             },
             timestamp: Date.now()
@@ -540,15 +1286,202 @@ export class WebSocketHandler {
     }
 
     /**
-     * Handle star lit event - broadcast to ALL players including sender (server-authoritative)
+     * Handle add friend request - creates BIDIRECTIONAL friendship
      */
-    private handleStarLit(connection: PlayerConnection, data: any): void {
-        // Broadcast to ALL players in realm INCLUDING sender
-        this.broadcastToRealmAll(connection.realm, {
-            type: 'star_lit',
+    private async handleAddFriend(connection: PlayerConnection, data: any): Promise<void> {
+        try {
+            const friendId = data.friendId;
+            const friendName = data.friendName || 'Unknown';
+
+            if (!friendId || friendId === connection.playerId) return;
+
+            // Add to local set (A → B)
+            connection.friends.add(friendId);
+
+            // Persist both directions to database
+            if (mongoPersistence.isReady()) {
+                // A → B
+                await mongoPersistence.addFriend(connection.playerId, friendId, friendName);
+                // B → A (reverse direction)
+                await mongoPersistence.addFriend(friendId, connection.playerId, connection.name);
+            }
+
+            // Confirm to requester
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'friend_added',
+                    data: { friendId, friendName },
+                    timestamp: Date.now()
+                });
+            }
+
+            // Also notify the friend if online (add reverse friendship to their local set)
+            const friendConnection = this.connections.get(friendId);
+            if (friendConnection) {
+                friendConnection.friends.add(connection.playerId);
+                if (friendConnection.ws.readyState === WebSocket.OPEN) {
+                    this.send(friendConnection.ws, {
+                        type: 'friend_added',
+                        data: { friendId: connection.playerId, friendName: connection.name },
+                        timestamp: Date.now()
+                    });
+                }
+            }
+
+            console.log(`👥 ${connection.name} ↔ ${friendName} are now friends (bidirectional)`);
+        } catch (error) {
+            console.error(`Failed to add friend for ${connection.playerId}:`, error);
+        }
+    }
+
+    /**
+     * Handle remove friend request - removes BIDIRECTIONAL friendship
+     */
+    private async handleRemoveFriend(connection: PlayerConnection, data: any): Promise<void> {
+        try {
+            const friendId = data.friendId;
+
+            if (!friendId) return;
+
+            // Remove from local set (A → B)
+            connection.friends.delete(friendId);
+
+            // Remove both directions from database
+            if (mongoPersistence.isReady()) {
+                // A → B
+                await mongoPersistence.removeFriend(connection.playerId, friendId);
+                // B → A (reverse direction)
+                await mongoPersistence.removeFriend(friendId, connection.playerId);
+            }
+
+            // Confirm to requester
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'friend_removed',
+                    data: { friendId },
+                    timestamp: Date.now()
+                });
+            }
+
+            // Also notify the friend if online
+            const friendConnection = this.connections.get(friendId);
+            if (friendConnection) {
+                friendConnection.friends.delete(connection.playerId);
+                if (friendConnection.ws.readyState === WebSocket.OPEN) {
+                    this.send(friendConnection.ws, {
+                        type: 'friend_removed',
+                        data: { friendId: connection.playerId },
+                        timestamp: Date.now()
+                    });
+                }
+            }
+
+            console.log(`💔 ${connection.name} ↔ ${friendId} friendship removed (bidirectional)`);
+        } catch (error) {
+            console.error(`Failed to remove friend for ${connection.playerId}:`, error);
+        }
+    }
+
+    /**
+     * Handle teleport to friend request (with server validation)
+     */
+    private handleTeleportToFriend(connection: PlayerConnection, data: any): void {
+        const friendId = data.friendId;
+
+        if (!friendId) return;
+
+        // Validate they are actually friends
+        if (!connection.friends.has(friendId)) {
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'error',
+                    data: { message: 'You can only teleport to friends' },
+                    timestamp: Date.now()
+                });
+            }
+            return;
+        }
+
+        // Find friend's connection
+        const friend = this.connections.get(friendId);
+        if (!friend) {
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'error',
+                    data: { message: 'Friend is not online' },
+                    timestamp: Date.now()
+                });
+            }
+            return;
+        }
+
+        // Validate same realm
+        if (friend.realm !== connection.realm) {
+            if (connection.ws.readyState === WebSocket.OPEN) {
+                this.send(connection.ws, {
+                    type: 'error',
+                    data: { message: 'Friend is in a different realm' },
+                    timestamp: Date.now()
+                });
+            }
+            return;
+        }
+
+        // Calculate teleport position (near friend, not on top)
+        const angle = Math.random() * Math.PI * 2;
+        const distance = 50 + Math.random() * 50;
+        const newX = friend.x + Math.cos(angle) * distance;
+        const newY = friend.y + Math.sin(angle) * distance;
+
+        // Update player position
+        connection.x = newX;
+        connection.y = newY;
+
+        // Track teleport stats
+        connection.teleports++;
+        connection.dirty = true;
+
+        // Send teleport confirmation with new position
+        if (connection.ws.readyState === WebSocket.OPEN) {
+            this.send(connection.ws, {
+                type: 'teleport_success',
+                data: {
+                    x: newX,
+                    y: newY,
+                    friendId,
+                    friendName: friend.name
+                },
+                timestamp: Date.now()
+            });
+        }
+
+        console.log(`🌀 ${connection.name} teleported to ${friend.name}`);
+    }
+
+    /**
+     * Handle WebRTC voice signaling
+     */
+    private handleVoiceSignal(connection: PlayerConnection, data: any): void {
+        const targetId = data.targetId;
+        const signalType = data.signalType; // 'offer', 'answer', 'ice-candidate'
+        const signalData = data.signalData;
+
+        if (!targetId || !signalType || !signalData) return;
+
+        const target = this.connections.get(targetId);
+        if (!target || target.ws.readyState !== WebSocket.OPEN) return;
+
+        // Only allow voice signaling within same realm
+        if (target.realm !== connection.realm) return;
+
+        // Forward the signal to the target
+        this.send(target.ws, {
+            type: 'voice_signal',
             data: {
-                ...data,
-                playerId: connection.playerId
+                fromId: connection.playerId,
+                fromName: connection.name,
+                signalType,
+                signalData
             },
             timestamp: Date.now()
         });
@@ -561,14 +1494,39 @@ export class WebSocketHandler {
         const connection = this.connections.get(playerId);
         if (connection) {
             console.log(`🔌 Player disconnected: ${playerId}`);
-            
+
+            // Save player data to database before removing
+            if (mongoPersistence.isReady()) {
+                mongoPersistence.updatePlayer(playerId, {
+                    name: connection.name,
+                    hue: connection.hue,
+                    xp: connection.xp,
+                    level: connection.level,
+                    stars: connection.stars,
+                    echoesCreated: connection.echoes,
+                    sings: connection.sings,
+                    pulses: connection.pulses,
+                    emotes: connection.emotes,
+                    teleports: connection.teleports,
+                    lastRealm: connection.realm,
+                    lastPosition: { x: connection.x, y: connection.y }
+                }).then(() => {
+                    console.log(`💾 Saved player data for ${connection.name}`);
+                }).catch(err => {
+                    console.error(`Failed to save player ${playerId}:`, err);
+                });
+            }
+
             // Notify other players in realm
             this.broadcastToRealm(connection.realm, {
                 type: 'player_leave',
                 data: { playerId },
                 timestamp: Date.now()
             }, playerId);
-            
+
+            // Clean up cooldowns
+            this.actionCooldowns.delete(playerId);
+
             this.connections.delete(playerId);
         }
     }
@@ -587,8 +1545,8 @@ export class WebSocketHandler {
      */
     private broadcastToRealm(realm: string, message: WebSocketMessage, excludePlayerId?: string): void {
         for (const [playerId, connection] of this.connections) {
-            if (connection.realm === realm && 
-                playerId !== excludePlayerId && 
+            if (connection.realm === realm &&
+                playerId !== excludePlayerId &&
                 connection.ws.readyState === WebSocket.OPEN) {
                 this.send(connection.ws, message);
             }
@@ -610,9 +1568,9 @@ export class WebSocketHandler {
      * Broadcast message to nearby players
      */
     private broadcastToNearby(
-        sender: PlayerConnection, 
-        data: any, 
-        messageType: string, 
+        sender: PlayerConnection,
+        data: any,
+        messageType: string,
         range: number
     ): void {
         for (const [playerId, connection] of this.connections) {
@@ -638,7 +1596,7 @@ export class WebSocketHandler {
     // @ts-ignore Method reserved for future player list synchronization
     private sendPlayersInRealm(ws: WebSocket, realm: string, excludePlayerId: string): void {
         const players: any[] = [];
-        
+
         for (const [playerId, connection] of this.connections) {
             if (connection.realm === realm && playerId !== excludePlayerId) {
                 players.push({
@@ -648,7 +1606,7 @@ export class WebSocketHandler {
                 });
             }
         }
-        
+
         this.send(ws, {
             type: 'players_list',
             data: { players },
@@ -662,7 +1620,7 @@ export class WebSocketHandler {
     private cleanupStaleConnections(): void {
         const now = Date.now();
         const staleIds: string[] = [];
-        
+
         for (const [playerId, connection] of this.connections) {
             if (now - connection.lastSeen > this.PLAYER_TIMEOUT) {
                 staleIds.push(playerId);
@@ -671,7 +1629,7 @@ export class WebSocketHandler {
                 connection.ws.ping();
             }
         }
-        
+
         for (const playerId of staleIds) {
             console.log(`🧹 Cleaning up stale connection: ${playerId}`);
             this.handleDisconnect(playerId);
@@ -683,11 +1641,11 @@ export class WebSocketHandler {
      */
     getPlayerCounts(): Record<string, number> {
         const counts: Record<string, number> = {};
-        
+
         for (const connection of this.connections.values()) {
             counts[connection.realm] = (counts[connection.realm] || 0) + 1;
         }
-        
+
         return counts;
     }
 
@@ -706,18 +1664,26 @@ export class WebSocketHandler {
             clearInterval(this.cleanupInterval);
             this.cleanupInterval = null;
         }
-        
+
+        if (this.saveInterval) {
+            clearInterval(this.saveInterval);
+            this.saveInterval = null;
+        }
+
+        // Save all player data before shutdown
+        this.saveDirtyPlayers();
+
         // Close all connections
         for (const connection of this.connections.values()) {
             connection.ws.close(1001, 'Server shutdown');
         }
         this.connections.clear();
-        
+
         if (this.wss) {
             this.wss.close();
             this.wss = null;
         }
-        
+
         console.log('🔌 WebSocket server shut down');
     }
 }

@@ -3,7 +3,7 @@ import { EventBus } from '../systems/EventBus';
 import type { Player, RealmId } from '../types';
 
 interface WebSocketMessage {
-    type: 'player_update' | 'player_leave' | 'player_joined' | 'players_list' | 'whisper' | 'sing' | 'pulse' | 'emote' | 'echo' | 'star_lit' | 'pong' | 'error' | 'world_state';
+    type: 'player_update' | 'player_leave' | 'player_joined' | 'players_list' | 'whisper' | 'sing' | 'pulse' | 'emote' | 'echo' | 'star_lit' | 'pong' | 'error' | 'world_state' | 'connection_made' | 'player_data' | 'xp_gain' | 'friend_added' | 'friend_removed' | 'teleport_success' | 'voice_signal' | 'cooldown';
     data: any;
     timestamp: number;
 }
@@ -30,7 +30,7 @@ export class WebSocketClient {
     private reconnectTimer: number | null = null;
     private messageQueue: WebSocketMessage[] = [];
     private isConnecting: boolean = false;
-    
+
     private playerId: string = '';
     private currentRealm: RealmId = 'genesis';
 
@@ -89,7 +89,7 @@ export class WebSocketClient {
                     this.isConnecting = false;
                     this.stopHeartbeat();
                     EventBus.emit('network:disconnected');
-                    
+
                     if (!event.wasClean) {
                         this.attemptReconnect();
                     }
@@ -111,7 +111,7 @@ export class WebSocketClient {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        
+
         if (this.ws) {
             this.ws.close(1000, 'Client disconnect');
             this.ws = null;
@@ -251,6 +251,50 @@ export class WebSocketClient {
     }
 
     /**
+     * Add a friend (synced to server)
+     */
+    addFriend(friendId: string, friendName: string): void {
+        this.send({
+            type: 'add_friend',
+            data: { friendId, friendName },
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * Remove a friend (synced to server)
+     */
+    removeFriend(friendId: string): void {
+        this.send({
+            type: 'remove_friend',
+            data: { friendId },
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * Request teleport to friend (server-validated)
+     */
+    teleportToFriend(friendId: string): void {
+        this.send({
+            type: 'teleport_to_friend',
+            data: { friendId },
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * Send WebRTC voice signaling data
+     */
+    sendVoiceSignal(targetId: string, signalType: string, signalData: any): void {
+        this.send({
+            type: 'voice_signal',
+            data: { targetId, signalType, signalData },
+            timestamp: Date.now()
+        });
+    }
+
+    /**
      * Get player ID
      */
     getPlayerId(): string {
@@ -312,7 +356,7 @@ export class WebSocketClient {
     private handleMessage(rawData: string): void {
         try {
             const message: WebSocketMessage = JSON.parse(rawData);
-            
+
             switch (message.type) {
                 case 'world_state':
                     // SERVER-AUTHORITATIVE: This is the primary way to receive all entities
@@ -348,6 +392,30 @@ export class WebSocketClient {
                 case 'star_lit':
                     this.handleStarLit(message.data);
                     break;
+                case 'connection_made':
+                    this.handleConnectionMade(message.data);
+                    break;
+                case 'player_data':
+                    this.handlePlayerData(message.data);
+                    break;
+                case 'xp_gain':
+                    this.handleXpGain(message.data);
+                    break;
+                case 'friend_added':
+                    EventBus.emit('network:friendAdded', message.data);
+                    break;
+                case 'friend_removed':
+                    EventBus.emit('network:friendRemoved', message.data);
+                    break;
+                case 'teleport_success':
+                    EventBus.emit('network:teleportSuccess', message.data);
+                    break;
+                case 'voice_signal':
+                    EventBus.emit('network:voiceSignal', message.data);
+                    break;
+                case 'cooldown':
+                    EventBus.emit('network:cooldown', message.data);
+                    break;
                 case 'pong':
                     // Server responded to ping - connection alive
                     break;
@@ -362,6 +430,42 @@ export class WebSocketClient {
     }
 
     /**
+     * Handle player data loaded from server
+     */
+    private handlePlayerData(data: any): void {
+        EventBus.emit('network:playerData', {
+            id: data.id,
+            name: data.name,
+            hue: data.hue,
+            xp: data.xp,
+            level: data.level,
+            stars: data.stars,
+            echoes: data.echoes,
+            sings: data.sings || 0,
+            pulses: data.pulses || 0,
+            emotes: data.emotes || 0,
+            teleports: data.teleports || 0,
+            achievements: data.achievements || [],
+            friends: data.friends || [],
+            lastRealm: data.lastRealm,
+            lastPosition: data.lastPosition
+        });
+    }
+
+    /**
+     * Handle XP gain from server (authoritative)
+     */
+    private handleXpGain(data: any): void {
+        EventBus.emit('network:xpGain', {
+            amount: data.amount,
+            reason: data.reason,
+            newXp: data.newXp,
+            newLevel: data.newLevel,
+            leveledUp: data.leveledUp
+        });
+    }
+
+    /**
      * Handle server-authoritative world state
      * This replaces ALL entities with what the server says
      */
@@ -371,6 +475,7 @@ export class WebSocketClient {
             entities: data.entities || [],
             litStars: data.litStars || [],
             echoes: data.echoes || [],
+            linkedCount: data.linkedCount || 0,  // Number of significant bonds
             timestamp: data.timestamp
         });
     }
@@ -386,7 +491,7 @@ export class WebSocketClient {
 
     private handlePlayerUpdate(data: any): void {
         // Emit update for ALL players including self (server-authoritative)
-        EventBus.emit('network:playerUpdate', { 
+        EventBus.emit('network:playerUpdate', {
             player: {
                 id: data.id,
                 name: data.name,
@@ -407,7 +512,7 @@ export class WebSocketClient {
 
     private handleWhisper(data: any): void {
         // Emit whisper event with full data for game to handle
-        EventBus.emit('network:whisper', { 
+        EventBus.emit('network:whisper', {
             from: data.from,
             fromName: data.fromName,
             text: data.text,
@@ -476,6 +581,17 @@ export class WebSocketClient {
         });
     }
 
+    private handleConnectionMade(data: any): void {
+        // Server notification that a significant bond was formed
+        EventBus.emit('network:connectionMade', {
+            player1Id: data.player1Id,
+            player1Name: data.player1Name,
+            player2Id: data.player2Id,
+            player2Name: data.player2Name,
+            isSelf: data.player1Id === this.playerId || data.player2Id === this.playerId
+        });
+    }
+
     /**
      * Start heartbeat to keep connection alive
      */
@@ -509,9 +625,9 @@ export class WebSocketClient {
 
         const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts);
         this.reconnectAttempts++;
-        
+
         console.log(`Attempting reconnect in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-        
+
         this.reconnectTimer = window.setTimeout(() => {
             this.connect(this.playerId, this.currentRealm);
         }, delay);

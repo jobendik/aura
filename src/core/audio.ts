@@ -20,7 +20,7 @@ class AudioManager {
 
     init(): void {
         if (this.ctx) return;
-        
+
         this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
         this.master = this.ctx.createGain();
         this.master.gain.value = this.settings.volume * 0.5;
@@ -86,17 +86,17 @@ class AudioManager {
 
     playNote(freq: number, vol: number = 0.08, dur: number = 2): void {
         if (!this.ctx || !this.settings.music || !this.master) return;
-        
+
         const o = this.ctx.createOscillator();
         const g = this.ctx.createGain();
         o.type = 'sine';
         o.frequency.value = freq;
-        
+
         const t = this.ctx.currentTime;
         g.gain.setValueAtTime(0, t);
         g.gain.linearRampToValueAtTime(vol * this.settings.volume, t + 0.06);
         g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-        
+
         o.connect(g);
         g.connect(this.master);
         o.start(t);
@@ -107,7 +107,7 @@ class AudioManager {
         const scale = SCALES[this.currentRealm] || SCALES.genesis;
         const base = scale[Math.floor(Math.random() * scale.length)];
         const v = 0.035 * intensity;
-        
+
         this.playNote(base, v, 1.5);
         setTimeout(() => this.playNote(base * 1.25, v * 0.75, 1.3), 50);
         setTimeout(() => this.playNote(base * 1.5, v * 0.55, 1.1), 100);
@@ -173,6 +173,70 @@ class AudioManager {
         [4, 5, 7].forEach((n, i) => {
             setTimeout(() => this.playNote(scale[n % scale.length], 0.04, 0.6), i * 100);
         });
+    }
+
+    /**
+     * Play star ignition sound with pitch based on ignition count (inspiration: Echo Garden)
+     */
+    playStarIgnite(ignitionCount: number = 1): void {
+        if (!this.ctx || !this.settings.music || !this.master) return;
+
+        // Base frequency increases with popularity
+        const baseFreq = 400 + (ignitionCount * 40);
+        const vol = 0.04 + Math.min(ignitionCount * 0.01, 0.06);
+
+        // Play a bright, satisfying tone
+        this.playNote(baseFreq, vol, 1.5);
+        setTimeout(() => this.playNote(baseFreq * 1.5, vol * 0.7, 1.2), 50);
+        setTimeout(() => this.playNote(baseFreq * 2, vol * 0.5, 0.9), 120);
+    }
+
+    /**
+     * Play ambient sparkle tones for atmosphere (inspiration: Echo Garden)
+     */
+    playAmbientSparkle(): void {
+        if (!this.ctx || !this.settings.music || !this.master) return;
+
+        const scale = SCALES[this.currentRealm] || SCALES.genesis;
+        const freq = scale[Math.floor(Math.random() * scale.length)];
+
+        // Very subtle ambient tone
+        this.playNote(freq * 2, 0.015, 4);
+    }
+
+    /**
+     * Play sound when bot speaks a thought
+     */
+    playBotWhisper(): void {
+        if (!this.ctx || !this.settings.music || !this.master) return;
+
+        const scale = SCALES[this.currentRealm] || SCALES.genesis;
+        // Soft, mysterious tone for bot speech
+        this.playNote(scale[0] * 0.5, 0.02, 1.2);
+        setTimeout(() => this.playNote(scale[2] * 0.5, 0.018, 1.0), 100);
+    }
+
+    /**
+     * Start ambient audio loop for atmosphere (call periodically)
+     */
+    private ambientInterval: NodeJS.Timeout | null = null;
+
+    startAmbientLoop(): void {
+        if (this.ambientInterval) return;
+
+        this.ambientInterval = setInterval(() => {
+            // Random chance to play ambient sparkle
+            if (Math.random() < 0.3) {
+                this.playAmbientSparkle();
+            }
+        }, 3000);
+    }
+
+    stopAmbientLoop(): void {
+        if (this.ambientInterval) {
+            clearInterval(this.ambientInterval);
+            this.ambientInterval = null;
+        }
     }
 }
 

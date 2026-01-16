@@ -20,7 +20,35 @@ export const BOT_THOUGHTS = [
 ] as const;
 
 /**
- * Bot state interface
+ * Bot responses when players interact with them (whisper, sing, pulse nearby)
+ * Inspired by CONSTEL and Voices in the Dark prototypes
+ */
+export const BOT_RESPONSES = [
+    "I see you!",
+    "Hello there.",
+    "Connecting...",
+    "Signal received.",
+    "Stay close.",
+    "Nice to meet you.",
+    "Join the cluster.",
+    "Bright light!",
+    "The warmth of company...",
+    "You found me.",
+    "Is someone there?",
+    "Don't leave me.",
+    "I'm with you now.",
+    "Connection made."
+] as const;
+
+/**
+ * Get a random bot response for when players interact
+ */
+export function getRandomBotResponse(): string {
+    return BOT_RESPONSES[Math.floor(Math.random() * BOT_RESPONSES.length)];
+}
+
+/**
+ * Bot state interface - used by both client and server
  */
 export interface BotState {
     id: string;
@@ -36,6 +64,15 @@ export interface BotState {
     actionTimer: number;
     thinkTimer: number;
     realm: string;
+    // Visual states (server-managed)
+    singing: number;
+    pulsing: number;
+    emoting: string | null;
+    // Message system (for bot speaking)
+    currentMessage: string | null;
+    messageTimer: number;
+    // Bond system (social connections)
+    bonds: Map<string, number>;  // playerId -> bond strength (0-100)
 }
 
 /**
@@ -55,7 +92,16 @@ export function createBot(x: number, y: number, realm: string = 'genesis'): BotS
         timer: 0,
         actionTimer: 0,
         thinkTimer: 0,
-        realm
+        realm,
+        // Visual states (server-managed)
+        singing: 0,
+        pulsing: 0,
+        emoting: null,
+        // Message system (for bot speaking)
+        currentMessage: null,
+        messageTimer: 0,
+        // Bond system (social connections)
+        bonds: new Map()
     };
 }
 
@@ -106,9 +152,10 @@ export function shouldBotSing(bot: BotState): boolean {
 
 /**
  * Check if bot should speak a thought
+ * Cooldown: 400 ticks (~20 seconds at 20Hz), then 0.5% chance per tick
  */
 export function shouldBotSpeak(bot: BotState): boolean {
-    return bot.thinkTimer > 500 && Math.random() < 0.002;
+    return bot.thinkTimer > 400 && Math.random() < 0.005;
 }
 
 /**
@@ -130,4 +177,170 @@ export function resetBotActionTimer(bot: BotState): void {
  */
 export function resetBotThinkTimer(bot: BotState): void {
     bot.thinkTimer = 0;
+}
+
+/**
+ * Decay visual states (call on server tick)
+ */
+export function decayBotVisualStates(bot: BotState, decayRate: number = 0.02): void {
+    bot.singing = Math.max(0, bot.singing - decayRate);
+    bot.pulsing = Math.max(0, bot.pulsing - decayRate);
+}
+
+/**
+ * Trigger bot singing
+ */
+export function triggerBotSing(bot: BotState): void {
+    bot.singing = 1;
+    bot.actionTimer = 0;
+}
+
+/**
+ * Trigger bot to speak a thought
+ */
+export function triggerBotSpeak(bot: BotState, message?: string): void {
+    bot.currentMessage = message || getRandomBotThought();
+    bot.messageTimer = 180; // ~3 seconds at 60fps
+    bot.thinkTimer = 0;
+}
+
+/**
+ * Decay bot message timer (call on server tick)
+ */
+export function decayBotMessageTimer(bot: BotState): void {
+    if (bot.messageTimer > 0) {
+        bot.messageTimer--;
+        if (bot.messageTimer <= 0) {
+            bot.currentMessage = null;
+        }
+    }
+}
+
+/**
+ * Convert bot state to player data for network broadcasting
+ */
+export function botToPlayerData(bot: BotState, viewerPlayerId?: string): {
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+    hue: number;
+    xp: number;
+    singing: number;
+    pulsing: number;
+    emoting: string | null;
+    isBot: boolean;
+    realm: string;
+    message?: string;
+    messageTimer?: number;
+    bondToViewer?: number;
+} {
+    return {
+        id: bot.id,
+        name: bot.name,
+        x: Math.round(bot.x),
+        y: Math.round(bot.y),
+        hue: bot.hue,
+        xp: bot.xp,
+        singing: bot.singing,
+        pulsing: bot.pulsing,
+        emoting: bot.emoting,
+        isBot: true,
+        realm: bot.realm,
+        message: bot.currentMessage || undefined,
+        messageTimer: bot.messageTimer > 0 ? bot.messageTimer : undefined,
+        bondToViewer: viewerPlayerId ? (bot.bonds.get(viewerPlayerId) || 0) : undefined
+    };
+}
+
+// ============================================================================
+// BOND SYSTEM FUNCTIONS
+// ============================================================================
+
+/**
+ * Strengthen bond between bot and a player
+ * @param bot The bot state
+ * @param playerId The player ID to bond with
+ * @param amount Amount to increase bond (default 15)
+ */
+export function strengthenBotBond(bot: BotState, playerId: string, amount: number = 15): void {
+    const currentBond = bot.bonds.get(playerId) || 0;
+    bot.bonds.set(playerId, Math.min(100, currentBond + amount));
+}
+
+/**
+ * Decay all bot bonds over time (call every server tick)
+ * @param bot The bot state
+ * @param decayRate Rate of decay per tick (default 0.05)
+ */
+export function decayBotBonds(bot: BotState, decayRate: number = 0.05): void {
+    for (const [playerId, strength] of bot.bonds.entries()) {
+        const newStrength = strength - decayRate;
+        if (newStrength <= 0) {
+            bot.bonds.delete(playerId);
+        } else {
+            bot.bonds.set(playerId, newStrength);
+        }
+    }
+}
+
+/**
+ * Get the player ID with strongest bond to this bot
+ * @param bot The bot state
+ * @returns Player ID with strongest bond, or null if no bonds
+ */
+export function getStrongestBond(bot: BotState): string | null {
+    let strongestId: string | null = null;
+    let strongestValue = 0;
+
+    for (const [playerId, strength] of bot.bonds.entries()) {
+        if (strength > strongestValue) {
+            strongestValue = strength;
+            strongestId = playerId;
+        }
+    }
+
+    return strongestId;
+}
+
+/**
+ * Apply social gravity - bot moves toward strongly bonded players
+ * @param bot The bot state
+ * @param players Map of player positions { id -> { x, y } }
+ * @param gravityStrength How strongly bonded bots are pulled (default 0.003)
+ */
+export function applySocialGravity(
+    bot: BotState,
+    players: Map<string, { x: number; y: number }>,
+    gravityStrength: number = 0.003
+): void {
+    for (const [playerId, strength] of bot.bonds.entries()) {
+        if (strength < 20) continue; // Only apply gravity for notable bonds
+
+        const playerPos = players.get(playerId);
+        if (!playerPos) continue;
+
+        const dx = playerPos.x - bot.x;
+        const dy = playerPos.y - bot.y;
+        const dist = Math.hypot(dx, dy);
+
+        // Don't pull if already close
+        if (dist < 80 || dist > 600) continue;
+
+        // Apply gentle pull toward bonded player
+        const force = (strength / 100) * gravityStrength;
+        bot.vx += (dx / dist) * force * dist;
+        bot.vy += (dy / dist) * force * dist;
+    }
+}
+
+/**
+ * Get total bond count for a bot (bonds > 10 strength)
+ */
+export function getBotBondCount(bot: BotState): number {
+    let count = 0;
+    for (const strength of bot.bonds.values()) {
+        if (strength > 10) count++;
+    }
+    return count;
 }

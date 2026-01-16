@@ -27,7 +27,7 @@ export interface GameConfig {
     BOT_SPAWN_CHANCE: number;
     BOT_REMOVE_CHANCE: number;
     COMPASS_DISTANCE: number;
-    
+
     // Animation & Physics Constants
     UPDATE_INTERVAL: number;
     MAX_TRAIL_LENGTH: number;
@@ -47,7 +47,7 @@ export interface GameConfig {
     PLAYER_TIMEOUT: number;
     MAX_ECHOES: number;
     MAX_PARTICLES: number;
-    
+
     // Content arrays (exported separately but typed here for reference)
     [key: string]: any;  // Allow additional properties like ACHIEVEMENTS, EMOTES, etc.
 }
@@ -96,6 +96,7 @@ export interface Emote {
     unlock: number;  // Level required to unlock
 }
 
+// Local player state
 export interface Player {
     x: number;
     y: number;
@@ -116,6 +117,7 @@ export interface Player {
     id: string;
     born: number;
     bonds: Map<string, number>;
+    linkedCount?: number;  // NEW: Number of significant bonds (server-provided)
 }
 
 export interface OtherPlayer {
@@ -139,6 +141,11 @@ export interface OtherPlayer {
     born: number;
     speaking: boolean;
     isBot: boolean;
+    // Bot message system
+    message?: string;
+    messageTimer?: number;
+    // Bond system - server-provided bond strength to local player
+    bondToViewer?: number;
 }
 
 export interface TrailPoint {

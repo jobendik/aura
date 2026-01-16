@@ -42,7 +42,7 @@ export class UIManager {
 
         if (xpVal) xpVal.textContent = `${player.xp} / ${nextLevelXP}`;
         if (xpFill) xpFill.style.width = `${Math.min(progress, 100)}%`;
-        if (connVal) connVal.textContent = player.bonds.size.toString();
+        if (connVal) connVal.textContent = (player.linkedCount || 0).toString();
         if (starVal) starVal.textContent = player.stars.toString();
         if (myName) myName.textContent = player.name;
         if (myTitle) myTitle.textContent = `${GameLogic.getForm(level)} • Lv ${level}`;
@@ -95,7 +95,7 @@ export class UIManager {
         if (ageElem) ageElem.textContent = age < 1 ? '<1h' : `${age}h`;
         if (bondVal) bondVal.textContent = `${Math.round(bond)}%`;
         if (bondFill) bondFill.style.width = `${bond}%`;
-        
+
         if (voice) {
             if (other.speaking) {
                 voice.innerHTML = '<span>🎙️</span> Speaking';
@@ -132,7 +132,7 @@ export class UIManager {
 
         if (realmText) realmText.textContent = realm;
         if (realmIcon) realmIcon.textContent = realm === 'genesis' ? '🌌' : realm === 'nebula' ? '🌸' : realm === 'void' ? '🌑' : '⚡';
-        
+
         realmButtons.forEach(btn => {
             const btnRealm = btn.getAttribute('data-realm');
             btn.classList.toggle('active', btnRealm === realm);
@@ -337,7 +337,7 @@ export class UIManager {
         const dailyList = document.getElementById('daily-quest-list');
         const weeklyList = document.getElementById('weekly-quest-list');
         const weeklyTimer = document.getElementById('weekly-reset-timer');
-        
+
         if (!dailyList) return;
 
         // Daily quests from config (QUESTS are the daily quests)
@@ -347,7 +347,7 @@ export class UIManager {
         dailyQuests.forEach((quest: any) => {
             const item = document.createElement('div');
             item.className = 'quest-item';
-            
+
             // TODO: Get actual progress from dailyProgress
             const progress = 0;
             const complete = progress >= quest.need;
@@ -374,11 +374,11 @@ export class UIManager {
         if (weeklyList) {
             weeklyList.innerHTML = '';
             const weeklyQuests = (CONFIG as any).WEEKLY_QUESTS || [];
-            
+
             weeklyQuests.forEach((quest: any) => {
                 const item = document.createElement('div');
                 item.className = 'quest-item weekly';
-                
+
                 // TODO: Get actual progress from weeklyProgress
                 const progress = 0;
                 const complete = progress >= quest.need;
@@ -424,7 +424,7 @@ export class UIManager {
 
         // Get achievements from CONFIG
         const achievements = CONFIG.ACHIEVEMENTS;
-        
+
         // TODO: Get unlocked set from game state - for now use localStorage
         let unlockedSet: Set<string>;
         try {
@@ -439,13 +439,13 @@ export class UIManager {
             const card = document.createElement('div');
             card.className = 'ach-card';
             const isUnlocked = unlockedSet.has(ach.id);
-            
+
             if (isUnlocked) {
                 card.classList.add('unlocked');
             } else {
                 card.classList.add('locked');
             }
-            
+
             // Add category class for styling
             if (ach.secret) {
                 card.classList.add('secret');
@@ -508,7 +508,7 @@ export class UIManager {
         if (ageElem) ageElem.textContent = age < 1 ? '<1h' : `${age}h`;
         if (bondVal) bondVal.textContent = '0%';
         if (bondFill) (bondFill as HTMLElement).style.width = '0%';
-        
+
         if (voice) {
             if (other.speaking) {
                 voice.innerHTML = '<span>🎙️</span> Speaking';

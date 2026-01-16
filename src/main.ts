@@ -4,7 +4,7 @@ import { CONFIG, EMOTES, ACHIEVEMENTS } from './core/config';
 import { Renderer } from './game/renderer';
 import { GameLogic } from './game/logic';
 import { UIManager } from './ui/manager';
-import { NetworkManager } from './network/manager';
+// NetworkManager removed - WebSocket is now the exclusive networking solution
 import { WebSocketClient } from './network/WebSocketClient';
 import { EventBus } from './systems/EventBus';
 import { VoiceChat } from './core/voice';
@@ -38,15 +38,22 @@ const gameState: GameState = {
     isSpeaking: false
 };
 
+// Track when we received initial player data vs XP gains (for race condition fix)
+let playerDataLoadedAt = 0;
+let lastXpGainAt = 0;
+
+// Voice peer discovery - update every 500ms (30 frames at 60fps)
+const VOICE_PEER_UPDATE_INTERVAL = 30;
+let voicePeerUpdateCounter = 0;
+
 // Initialize managers
 const audio = new AudioManager(settings);
-// @ts-ignore Reserved for future HTTP fallback
-const _network = new NetworkManager();
+// NOTE: HTTP fallback removed - all networking uses WebSocketClient exclusively
 const voiceChat = new VoiceChat(settings);
 
 // Initialize WebSocket client for real-time sync
 // Use same host/port for WebSocket (Vite proxy handles routing to backend)
-const wsUrl = window.location.protocol === 'https:' 
+const wsUrl = window.location.protocol === 'https:'
     ? `wss://${window.location.host}/aura/ws`
     : `ws://${window.location.host}/aura/ws`;
 
@@ -83,8 +90,7 @@ let weeklyProgress: WeeklyProgress = PersistenceManager.loadWeeklyProgress();
 const unlocked = PersistenceManager.loadAchievements();
 const friends: Set<string> = PersistenceManager.loadFriends();
 const visitedRealms: Set<string> = PersistenceManager.loadVisitedRealms();
-// @ts-ignore Reserved for friends panel
-const _recentPlayers = PersistenceManager.loadRecent();
+// NOTE: Recent players are loaded on-demand via PersistenceManager.loadRecent()
 
 // Canvas setup
 const canvas = document.getElementById('cosmos') as HTMLCanvasElement;
@@ -158,6 +164,7 @@ function setupUI(): void {
         document.getElementById('onboard')?.classList.remove('show');
         audio.init();
         audio.startDrone();
+        audio.startAmbientLoop(); // Start ambient sparkle sounds for atmosphere
         gameState.gameActive = true;
         startGame();
     });
@@ -248,11 +255,11 @@ function setupUI(): void {
             const tabType = (tab as HTMLElement).dataset.tab;
             document.querySelectorAll('#quests .panel-tab').forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            
+
             const dailyList = document.getElementById('daily-quest-list');
             const weeklyList = document.getElementById('weekly-quest-list');
             const weeklyTimer = document.getElementById('weekly-reset-timer');
-            
+
             if (tabType === 'daily') {
                 if (dailyList) dailyList.style.display = 'block';
                 if (weeklyList) weeklyList.style.display = 'none';
@@ -271,14 +278,14 @@ function setupUI(): void {
             const category = (tab as HTMLElement).dataset.achTab;
             document.querySelectorAll('#achievements .ach-tab').forEach(t => t.classList.remove('active'));
             tab.classList.add('active');
-            
+
             const achCards = document.querySelectorAll('#ach-grid .ach-card');
             const achievements = ACHIEVEMENTS;
-            
+
             achCards.forEach((card, i) => {
                 const ach = achievements[i];
                 if (!ach) return;
-                
+
                 if (category === 'all') {
                     (card as HTMLElement).style.display = 'flex';
                 } else if (category === 'secret') {
@@ -384,9 +391,13 @@ function setupUI(): void {
         if (!gameState.selectedId) return;
         const other = others.get(gameState.selectedId);
         if (!other) return;
-        
+
         const friendBtn = document.getElementById('prof-friend');
         if (friends.has(gameState.selectedId)) {
+            // Remove friend - send to server
+            if (wsClient.isConnected()) {
+                wsClient.removeFriend(gameState.selectedId);
+            }
             friends.delete(gameState.selectedId);
             PersistenceManager.saveFriends(friends);
             if (friendBtn) {
@@ -396,6 +407,10 @@ function setupUI(): void {
             UIManager.toast(`Removed ${other.name} from friends`);
             stats.friends = friends.size;
         } else {
+            // Add friend - send to server
+            if (wsClient.isConnected()) {
+                wsClient.addFriend(gameState.selectedId, other.name);
+            }
             friends.add(gameState.selectedId);
             PersistenceManager.saveFriends(friends);
             if (friendBtn) {
@@ -410,21 +425,21 @@ function setupUI(): void {
         }
     });
 
-    // Teleport button (only works for friends in same realm)
+    // Teleport button (server-validated, only works for friends in same realm)
     document.getElementById('prof-teleport')?.addEventListener('click', () => {
         if (!gameState.selectedId) return;
         const other = others.get(gameState.selectedId);
-        if (!other || !friends.has(gameState.selectedId)) return;
-        
-        // Teleport near the friend
-        player.x = other.x + (Math.random() - 0.5) * 100;
-        player.y = other.y + (Math.random() - 0.5) * 100;
-        player.tx = player.x;
-        player.ty = player.y;
-        stats.teleports++;
-        UIManager.toast(`Teleported to ${other.name}! 🌀`);
-        UIManager.hideProfile();
-        checkAchievements();
+        if (!other || !friends.has(gameState.selectedId)) {
+            UIManager.toast('You can only teleport to friends', 'warning');
+            return;
+        }
+
+        // Request teleport from server (will validate and respond)
+        if (wsClient.isConnected()) {
+            wsClient.teleportToFriend(gameState.selectedId);
+        } else {
+            UIManager.toast('⚠️ Not connected to server', 'warning');
+        }
     });
 
     // Click outside to close emotes
@@ -628,6 +643,13 @@ function changeRealm(realmId: string): void {
                 checkAchievements();
             }
 
+            // Disconnect all voice peers from old realm to prevent orphaned connections
+            if (voiceChat.enabled) {
+                for (const peerId of voiceChat.getConnectedPeers()) {
+                    voiceChat.disconnectPeer(peerId);
+                }
+            }
+
             // Clear other players and stars from old realm
             others.clear();
 
@@ -691,17 +713,17 @@ function setupEmotes(): void {
         const opt = document.createElement('div');
         opt.className = 'emote';
         const isUnlocked = playerLevel >= emoteData.unlock;
-        
+
         if (!isUnlocked) {
             opt.classList.add('locked');
             opt.innerHTML = `${emoteData.emoji}<span class="emote-level">Lv${emoteData.unlock}</span>`;
         } else {
             opt.textContent = emoteData.emoji;
         }
-        
+
         opt.style.left = `${x}px`;
         opt.style.top = `${y}px`;
-        
+
         opt.addEventListener('click', () => {
             if (!isUnlocked) {
                 UIManager.toast(`Unlock at Level ${emoteData.unlock}`, 'warning');
@@ -780,20 +802,19 @@ function doPulse(): void {
 
 function applySingEffect(playerId: string, x: number, y: number, hue: number): void {
     const isSelf = playerId === player.id;
-    
+
     if (isSelf) {
         player.singing = 1;
         if (settings.shake) camera.shake = 0.3;
-        stats.sings++;
+        // Server handles stats and XP - just update local progress for UI
         dailyProgress.sings++;
         PersistenceManager.saveDailyProgress(dailyProgress);
-        checkAchievements();
     } else {
         // Update other player's singing state
         const other = others.get(playerId);
         if (other) other.singing = 1;
     }
-    
+
     // Play audio and particles for everyone
     audio.playSing(hue);
     if (settings.particles) {
@@ -804,12 +825,12 @@ function applySingEffect(playerId: string, x: number, y: number, hue: number): v
 function applyPulseEffect(playerId: string, x: number, y: number): void {
     const isSelf = playerId === player.id;
     const pulseHue = isSelf ? player.hue : (others.get(playerId)?.hue || 200);
-    
+
     if (isSelf) {
         player.pulsing = 1;
         if (settings.shake) camera.shake = 0.5;
-        stats.pulses++;
-        
+        // Server handles stats and XP
+
         // Light stars for local player
         const viewRadius = GameLogic.getViewRadius(player);
         let lit = 0;
@@ -829,26 +850,26 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
         }
 
         if (lit > 0) {
-            player.stars += lit;
-            stats.stars += lit;
+            // Server will handle stats and XP for star lighting
+            player.stars += lit;  // Local counter for UI
             dailyProgress.stars += lit;
             PersistenceManager.saveDailyProgress(dailyProgress);
             weeklyProgress.stars += lit;
             PersistenceManager.saveWeeklyProgress(weeklyProgress);
-            gainXP(lit * 3);
             UIManager.updateHUD(player);
-            // Broadcast which stars were lit
+            // Play star ignition audio with pitch based on count
+            audio.playStarIgnite(lit);
+            // Broadcast which stars were lit - server will award XP
             if (wsClient.isConnected() && litStarIds.length > 0) {
                 wsClient.sendStarLit(player, litStarIds);
             }
         }
-        checkAchievements();
     } else {
         // Update other player's pulsing state
         const other = others.get(playerId);
         if (other) other.pulsing = 1;
     }
-    
+
     // Play audio and particles for everyone
     audio.playPulse();
     if (settings.particles) {
@@ -858,14 +879,13 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
 
 function applyEmoteEffect(playerId: string, emoji: string, x: number, y: number): void {
     const isSelf = playerId === player.id;
-    
+
     if (isSelf) {
         player.emoting = emoji;
         player.emoteT = 0;
-        stats.emotes++;
+        // Server handles stats and XP
         dailyProgress.emotes++;
         PersistenceManager.saveDailyProgress(dailyProgress);
-        checkAchievements();
     } else {
         const other = others.get(playerId);
         if (other) {
@@ -873,7 +893,7 @@ function applyEmoteEffect(playerId: string, emoji: string, x: number, y: number)
             other.emoteT = 0;
         }
     }
-    
+
     // Show floating emote for everyone
     const halo = isSelf ? player.halo : (others.get(playerId)?.halo || 55);
     floats.push(new FloatingText(x, y - halo - 35, emoji, 80, 22));
@@ -881,17 +901,16 @@ function applyEmoteEffect(playerId: string, emoji: string, x: number, y: number)
 
 function applyEchoEffect(playerId: string, text: string, x: number, y: number, hue: number, playerName: string): void {
     const isSelf = playerId === player.id;
-    
+
     // Create echo for everyone
     const echo = new Echo(x, y, text, hue, playerName, playerId);
     echoes.push(echo);
-    
+
     if (isSelf) {
-        player.echoes++;
-        gainXP(5);
+        // Server handles echo count and XP - just show visual feedback
         UIManager.toast('✨ Echo planted');
     }
-    
+
     audio.playEcho();
 }
 
@@ -972,7 +991,7 @@ function setupNetworkEventListeners(): void {
     // Handle player join (new player in realm)
     EventBus.on('network:playerJoined', ({ player: p }) => {
         if (p.id === player.id) return;
-        
+
         const level = Math.floor((p.xp || 0) / 100);
         others.set(p.id, {
             id: p.id,
@@ -1033,7 +1052,7 @@ function setupNetworkEventListeners(): void {
         // Show incoming whisper
         UIManager.toast(`💬 ${data.fromName}: ${data.text}`, 'whisper');
         audio.playWhisperRecv();
-        
+
         // Show floating text at sender position
         floats.push(new FloatingText(data.x, data.y - 50, `💬 ${data.text}`, 90, 12));
     });
@@ -1041,40 +1060,61 @@ function setupNetworkEventListeners(): void {
     EventBus.on('network:starLit', (data) => {
         // Another player lit stars - update visuals
         if (!data.isSelf && data.starIds) {
+            let starsLit = 0;
             for (const starId of data.starIds) {
                 for (const [k, arr] of stars) {
                     for (const s of arr) {
                         if ((s.id || k) === starId && !s.lit) {
                             s.lit = true;
                             s.burst = 1;
+                            starsLit++;
                         }
                     }
                 }
             }
+            // Play star ignition audio with pitch based on count
+            if (starsLit > 0) {
+                audio.playStarIgnite(starsLit);
+            }
         }
+    });
+
+    // Handle significant connection event
+    EventBus.on('network:connectionMade', (data) => {
+        const otherName = data.player1Id === player.id ? data.player2Name : data.player1Name;
+        UIManager.toast(`🔗 Connected with ${otherName}!`, 'conn');
+        audio.playConn();
+        // Add visual particle burst at player position? (handled locally by update loop maybe)
     });
 
     // === SERVER-AUTHORITATIVE WORLD STATE ===
     // This is the PRIMARY way we receive all entities (players + bots)
     // The server broadcasts this at 20Hz to all clients
     EventBus.on('network:worldState', (data) => {
-        const { entities, litStars: _litStars, echoes: serverEchoes } = data;
-        
+        const { entities, litStars: _litStars, echoes: serverEchoes, linkedCount } = data;
+
+        // Update local player stats
+        if (linkedCount !== undefined) {
+            player.linkedCount = linkedCount;
+            stats.connections = linkedCount; // Keep stats in sync
+            UIManager.updateHUD(player);
+        }
+
         // Clear and rebuild others map from server entities
         // Keep track of IDs we've seen to remove stale entries
         const seenIds = new Set<string>();
-        
+
         for (const entity of entities) {
             if (entity.id === player.id) {
                 // Skip self - we control our own position locally for responsiveness
                 continue;
             }
-            
+
             seenIds.add(entity.id);
-            
+
             const existing = others.get(entity.id);
             const level = Math.floor((entity.xp || 0) / 100);
-            
+
             if (existing) {
                 // Smooth interpolation for existing entities
                 existing.x = existing.x * 0.7 + entity.x * 0.3;
@@ -1086,6 +1126,13 @@ function setupNetworkEventListeners(): void {
                 existing.pulsing = entity.pulsing || 0;
                 existing.emoting = entity.emoting || null;
                 existing.isBot = entity.isBot || false;
+                // Bot message system
+                existing.message = entity.message || undefined;
+                existing.messageTimer = entity.messageTimer || undefined;
+                // Update bond strength from server
+                if (entity.bondToViewer !== undefined) {
+                    existing.bondToViewer = entity.bondToViewer;
+                }
             } else {
                 // New entity
                 others.set(entity.id, {
@@ -1106,21 +1153,26 @@ function setupNetworkEventListeners(): void {
                     trail: [],
                     born: entity.born || Date.now(),
                     speaking: false,
-                    isBot: entity.isBot || false
+                    isBot: entity.isBot || false,
+                    // Bot message system
+                    message: entity.message,
+                    messageTimer: entity.messageTimer,
+                    // Bond system
+                    bondToViewer: entity.bondToViewer
                 });
             }
         }
-        
+
         // Remove entities no longer in server state
         for (const [id] of others) {
             if (!seenIds.has(id)) {
                 others.delete(id);
             }
         }
-        
+
         // Update lit stars from server (commented out for now - stars handled separately)
         // TODO: Server-authoritative stars
-        
+
         // Update echoes from server
         if (serverEchoes && serverEchoes.length > 0) {
             for (const e of serverEchoes) {
@@ -1145,6 +1197,156 @@ function setupNetworkEventListeners(): void {
 
     EventBus.on('network:error', ({ error }) => {
         console.error('Network error:', error);
+    });
+
+    // === SERVER-AUTHORITATIVE PLAYER DATA ===
+    // Loaded from database when connecting
+    EventBus.on('network:playerData', (data) => {
+        const now = Date.now();
+        console.log(`📂 Loaded player data from server: ${data.name} (Level ${data.level})`);
+        
+        // Sync player state with server
+        player.name = data.name;
+        player.hue = data.hue;
+        
+        // Only update XP if we haven't received any xpGain messages yet
+        // This prevents race conditions where playerData arrives after xpGain
+        if (lastXpGainAt === 0 || now < lastXpGainAt) {
+            player.xp = data.xp;
+            player.stars = data.stars;
+            player.echoes = data.echoes;
+            stats.level = data.level;
+            stats.stars = data.stars;
+            stats.echoes = data.echoes;
+        }
+        
+        // Always update action stats from server (these don't change during XP gain)
+        stats.sings = data.sings || 0;
+        stats.pulses = data.pulses || 0;
+        stats.emotes = data.emotes || 0;
+        stats.teleports = data.teleports || 0;
+        
+        // Update visual size based on level
+        const currentLevel = stats.level || data.level;
+        player.r = 11 + currentLevel * 1.5;
+        player.halo = 55 + currentLevel * 8;
+        
+        // Restore position if available
+        if (data.lastPosition && data.lastRealm === gameState.currentRealm) {
+            player.x = data.lastPosition.x;
+            player.y = data.lastPosition.y;
+            player.tx = data.lastPosition.x;
+            player.ty = data.lastPosition.y;
+            console.log(`📍 Restored position: ${player.x.toFixed(0)}, ${player.y.toFixed(0)}`);
+        }
+        
+        // Sync friends from server
+        friends.clear();
+        for (const friend of data.friends) {
+            friends.add(friend.id);
+        }
+        
+        // Sync achievements from server
+        for (const achId of data.achievements) {
+            unlocked.add(achId);
+        }
+        
+        // Update UI
+        UIManager.updateHUD(player);
+        UIManager.updateRealmLocks(player.xp);
+        
+        // Check achievements with restored stats
+        checkAchievements();
+        
+        playerDataLoadedAt = now;
+        console.log(`✅ Synced ${friends.size} friends and ${unlocked.size} achievements from server`);
+    });
+
+    // === SERVER-AUTHORITATIVE XP GAINS ===
+    // XP is now calculated server-side only
+    EventBus.on('network:xpGain', (data) => {
+        const { amount, reason, newXp, newLevel, leveledUp } = data;
+        lastXpGainAt = Date.now();
+        
+        // Update local state with server-authoritative values
+        const oldLevel = GameLogic.getLevel(player.xp);
+        player.xp = newXp;
+        
+        // Show XP gain floating text
+        floats.push(new FloatingText(player.x, player.y - player.halo - 25, `+${amount} XP`, 50, 13));
+        
+        // Update action stats based on reason
+        if (reason === 'sing') stats.sings++;
+        else if (reason === 'pulse') stats.pulses++;
+        else if (reason === 'emote') stats.emotes++;
+        
+        // Handle level up
+        if (leveledUp && newLevel > oldLevel) {
+            audio.playLevelUp();
+            if (settings.particles) {
+                GameLogic.spawnParticles(player.x, player.y, player.hue, 55, true, particles);
+            }
+            player.r = 11 + newLevel * 1.5;
+            player.halo = 55 + newLevel * 8;
+            stats.level = newLevel;
+            UIManager.toast(`✨ Level ${newLevel}! You are now a ${GameLogic.getForm(newLevel)}`, 'level');
+            UIManager.updateRealmLocks(player.xp);
+        }
+        
+        UIManager.updateHUD(player);
+        checkAchievements();
+        console.log(`⭐ XP gained: +${amount} (${reason}) - Total: ${newXp}`);
+    });
+
+    // === COOLDOWN FEEDBACK ===
+    EventBus.on('network:cooldown', (data) => {
+        const seconds = (data.remainingMs / 1000).toFixed(1);
+        UIManager.toast(`⏳ ${data.action} on cooldown (${seconds}s)`, 'warning');
+    });
+
+    // === FRIENDS SYSTEM (Server-Synced) ===
+    EventBus.on('network:friendAdded', (data) => {
+        friends.add(data.friendId);
+        stats.friends = friends.size;
+        weeklyProgress.newFriends++;
+        PersistenceManager.saveWeeklyProgress(weeklyProgress);
+        UIManager.toast(`Added ${data.friendName} as friend! ❤️`, 'success');
+        checkAchievements();
+    });
+
+    EventBus.on('network:friendRemoved', (data) => {
+        friends.delete(data.friendId);
+        stats.friends = friends.size;
+    });
+
+    // === TELEPORT (Server-Validated) ===
+    EventBus.on('network:teleportSuccess', (data) => {
+        // Update player position from server
+        player.x = data.x;
+        player.y = data.y;
+        player.tx = data.x;
+        player.ty = data.y;
+        
+        stats.teleports++;
+        UIManager.toast(`Teleported to ${data.friendName}! 🌀`);
+        UIManager.hideProfile();
+        
+        // Visual effect
+        if (settings.particles) {
+            GameLogic.spawnParticles(player.x, player.y, player.hue, 40, true, particles);
+        }
+        
+        checkAchievements();
+    });
+
+    // === VOICE SIGNALING ===
+    EventBus.on('network:voiceSignal', (data) => {
+        // Forward to voice chat system
+        voiceChat.handleSignal({
+            from: data.fromId,
+            signalType: data.signalType,
+            data: data.signalData
+        });
     });
 }
 
@@ -1243,6 +1445,38 @@ function update(): void {
         }
     }
 
+    // Voice peer discovery - check nearby players for voice connections (throttled)
+    voicePeerUpdateCounter++;
+    if (voicePeerUpdateCounter >= VOICE_PEER_UPDATE_INTERVAL) {
+        voicePeerUpdateCounter = 0;
+        if (voiceChat.enabled) {
+            const nearbyVoicePeers = new Set<string>();
+            const VOICE_RANGE = 500; // Same as spatial audio range
+            
+            for (const [id, other] of others.entries()) {
+                // Skip bots - they don't have voice
+                if (other.isBot) continue;
+                
+                const dist = Math.hypot(other.x - player.x, other.y - player.y);
+                if (dist <= VOICE_RANGE) {
+                    nearbyVoicePeers.add(id);
+                }
+            }
+            
+            // Update voice connections and spatial audio
+            voiceChat.updateNearbyPeers(nearbyVoicePeers, VOICE_RANGE);
+            
+            // Update spatial audio volumes for connected peers
+            for (const id of voiceChat.getConnectedPeers()) {
+                const other = others.get(id);
+                if (other) {
+                    const dist = Math.hypot(other.x - player.x, other.y - player.y);
+                    voiceChat.updateSpatialAudio(id, dist, VOICE_RANGE);
+                }
+            }
+        }
+    }
+
     // Update particles
     GameLogic.updateParticles(particles);
 
@@ -1274,7 +1508,7 @@ function update(): void {
 
 function render(): void {
     const viewRadius = GameLogic.getViewRadius(player);
-    
+
     // Debug: Log others count periodically
     if (Math.random() < 0.01) { // 1% of frames
         console.log(`🎨 Render: ${others.size} others in map, viewRadius: ${viewRadius}, player at (${player.x.toFixed(0)}, ${player.y.toFixed(0)})`);
@@ -1354,6 +1588,14 @@ async function toggleVoice(): Promise<void> {
         updateVoiceUI();
         console.log('🔇 Voice disabled');
     } else {
+        // Set up WebSocket-based signaling
+        voiceChat.setUserId(player.id);
+        voiceChat.setSignalSender((targetId, signalType, data) => {
+            if (wsClient.isConnected()) {
+                wsClient.sendVoiceSignal(targetId, signalType, data);
+            }
+        });
+
         const success = await voiceChat.init();
         if (success) {
             gameState.voiceOn = true;
@@ -1458,7 +1700,7 @@ function checkDailyReset(): void {
 function checkWeeklyQuests(): void {
     const weekly = PersistenceManager.loadWeeklyProgress();
     const currentWeek = PersistenceManager.getWeekNumber();
-    
+
     if (weekly.week !== currentWeek) {
         // Reset weekly progress
         weeklyProgress = {
@@ -1479,12 +1721,12 @@ function checkWeeklyQuests(): void {
 function checkAchievements(): void {
     const achievements = ACHIEVEMENTS;
     let newUnlocks = 0;
-    
+
     for (const ach of achievements) {
         if (unlocked.has(ach.id)) continue;
-        
+
         let earned = false;
-        
+
         // Check requirement based on achievement type
         switch (ach.id) {
             case 'firstStar': earned = stats.stars >= 1; break;
@@ -1522,7 +1764,7 @@ function checkAchievements(): void {
             case 'constellation': earned = stats.constellation >= 3; break;
             case 'teleporter': earned = stats.teleports >= 10; break;
         }
-        
+
         if (earned) {
             unlocked.add(ach.id);
             newUnlocks++;
@@ -1530,7 +1772,7 @@ function checkAchievements(): void {
             gainXP(ach.reward || 10);
         }
     }
-    
+
     if (newUnlocks > 0) {
         PersistenceManager.saveAchievements(unlocked);
         UIManager.updateAchievements();

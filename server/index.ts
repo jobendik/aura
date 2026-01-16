@@ -16,6 +16,13 @@ import {
     CoordinateSchema,
     formatZodError
 } from './middleware/validation';
+import {
+    type BotState,
+    createBot,
+    updateBot,
+    shouldBotSing,
+    triggerBotSing
+} from '../common/bot';
 
 // Generate secure random ID
 function generateId(): string {
@@ -112,74 +119,27 @@ const litStars = new Set<string>(); // In-memory cache, synced with MongoDB
 // Flag to track MongoDB availability
 let mongoConnected = false;
 
-// Bot Logic
-class Bot {
-    id: string;
-    x: number;
-    y: number;
-    vx: number;
-    vy: number;
-    hue: number;
-    name: string;
-    xp: number;
-    moveAngle: number;
-    actionTimer: number;
-    thinkTimer: number;
-    realm: string;
-
-    constructor(x: number, y: number, realm: string = 'genesis') {
-        this.id = 'bot-' + generateId();
-        this.x = x;
-        this.y = y;
-        this.vx = 0;
-        this.vy = 0;
-        this.hue = 180 + Math.random() * 60;
-        this.name = 'Guardian';
-        this.xp = 100 + Math.random() * 800;
-        this.moveAngle = Math.random() * Math.PI * 2;
-        this.actionTimer = 0;
-        this.thinkTimer = 0;
-        this.realm = realm;
-    }
-
-    update() {
-        // Change movement direction
-        if (Math.random() < 0.02) {
-            this.moveAngle += (Math.random() - 0.5) * 2;
-        }
-
-        // Apply movement
-        this.vx += Math.cos(this.moveAngle) * 0.2;
-        this.vy += Math.sin(this.moveAngle) * 0.2;
-        this.vx *= 0.94;
-        this.vy *= 0.94;
-        this.x += this.vx;
-        this.y += this.vy;
-
-        this.actionTimer++;
-        this.thinkTimer++;
-    }
-
-    toPlayerState(): PlayerState {
-        return {
-            id: this.id,
-            name: this.name,
-            x: this.x,
-            y: this.y,
-            realm: this.realm,
-            hue: this.hue,
-            xp: this.xp,
-            lastSeen: Date.now(),
-            isBot: true,
-            singing: (this.actionTimer > 300 && Math.random() < 0.005) ? 1 : 0,
-            pulsing: 0,
-            emoting: null
-        };
-    }
-}
-
-const bots: Bot[] = [];
+// Bot Logic - Using shared implementation from common/bot.ts
+const bots: BotState[] = [];
 const MIN_POPULATION = 3;
+
+// Helper to convert BotState to PlayerState for HTTP API
+function botToPlayerState(bot: BotState): PlayerState {
+    return {
+        id: bot.id,
+        name: bot.name,
+        x: bot.x,
+        y: bot.y,
+        realm: bot.realm,
+        hue: bot.hue,
+        xp: bot.xp,
+        lastSeen: Date.now(),
+        isBot: true,
+        singing: bot.singing,
+        pulsing: bot.pulsing,
+        emoting: bot.emoting
+    };
+}
 
 // Server loop for bots (20Hz)
 setInterval(() => {
@@ -188,17 +148,17 @@ setInterval(() => {
         if (Math.random() < 0.01) {
             const angle = Math.random() * Math.PI * 2;
             const dist = 500 + Math.random() * 500;
-            bots.push(new Bot(Math.cos(angle) * dist, Math.sin(angle) * dist));
+            bots.push(createBot(Math.cos(angle) * dist, Math.sin(angle) * dist));
         }
     } else if (players.size + bots.length > MIN_POPULATION && bots.length > 0) {
         if (Math.random() < 0.005) bots.pop();
     }
 
-    // Update bots
-    bots.forEach(b => {
-        b.update();
-        if (b.actionTimer > 300 && Math.random() < 0.005) {
-            b.actionTimer = 0; // Reset after singing
+    // Update bots using shared logic
+    bots.forEach(bot => {
+        updateBot(bot);
+        if (shouldBotSing(bot)) {
+            triggerBotSing(bot);
         }
     });
 }, 50);
@@ -231,15 +191,15 @@ app.get('/api/players', (req, res) => {
             return true;
         });
 
-        // Add bots to valid players list
+        // Add bots to valid players list (using helper function)
         const activeBots = bots
             .filter(b => !realm || b.realm === realm)
-            .map(b => b.toPlayerState());
+            .map(b => botToPlayerState(b));
 
         // Debug logging
         console.log(`📡 GET /api/players - ${activePlayers.length} players, ${activeBots.length} bots in realm: ${realm}`);
         if (activePlayers.length > 0) {
-            console.log('   Players:', activePlayers.map(p => `${p.name}(${p.id.slice(0,10)}) at (${p.x}, ${p.y})`).join(', '));
+            console.log('   Players:', activePlayers.map(p => `${p.name}(${p.id.slice(0, 10)}) at (${p.x}, ${p.y})`).join(', '));
         }
 
         res.json([...activePlayers, ...activeBots]);
@@ -252,14 +212,14 @@ app.get('/api/players', (req, res) => {
 // Events endpoint - updates player state from client heartbeats/actions
 app.post('/api/events', postLimiter, (req, res) => {
     const event = req.body;
-    
+
     // Debug logging
     console.log('📨 Event received:', event.type, 'from', event.uid, 'at', event.x?.toFixed(0), event.y?.toFixed(0));
 
     // Handle star lighting
     if (event.type === 'star_lit' && event.starId) {
         litStars.add(event.starId);
-        
+
         // Persist to MongoDB if connected
         if (mongoConnected && event.uid) {
             mongoPersistence.litStar(
@@ -268,7 +228,7 @@ app.post('/api/events', postLimiter, (req, res) => {
                 event.uid
             ).catch(err => console.error('Failed to persist lit star:', err));
         }
-        
+
         res.json({ success: true });
         return;
     }
@@ -316,7 +276,7 @@ app.post('/api/events', postLimiter, (req, res) => {
 app.get('/api/stars/lit', async (req, res) => {
     try {
         const realm = req.query.realm as string;
-        
+
         if (mongoConnected) {
             const stars = await mongoPersistence.getLitStars(realm);
             res.json(stars);
@@ -339,9 +299,9 @@ app.get('/api/stars/lit', async (req, res) => {
 app.get('/api/echoes', async (req, res) => {
     try {
         const realm = req.query.realm as string;
-        
+
         if (mongoConnected) {
-            const echoes = realm 
+            const echoes = realm
                 ? await mongoPersistence.getEchoes(realm)
                 : await mongoPersistence.getEchoes('genesis'); // Default realm
             res.json(echoes);
@@ -397,11 +357,11 @@ app.post('/api/echoes/:echoId/vote', postLimiter, async (req, res) => {
     try {
         const { echoId } = req.params;
         const { delta } = req.body; // +1 for upvote, -1 for downvote
-        
+
         if (!mongoConnected) {
             return res.status(503).json({ error: 'Database not available' });
         }
-        
+
         const newVotes = await mongoPersistence.voteEcho(echoId, delta || 1);
         res.json({ success: true, votes: newVotes });
     } catch (error) {
@@ -414,11 +374,11 @@ app.post('/api/echoes/:echoId/vote', postLimiter, async (req, res) => {
 app.get('/api/echoes/near', async (req, res) => {
     try {
         const { realm, x, y, radius } = req.query;
-        
+
         if (!mongoConnected) {
             return res.json([]);
         }
-        
+
         const echoes = await mongoPersistence.getEchoesNear(
             realm as string || 'genesis',
             parseFloat(x as string) || 0,
@@ -492,11 +452,11 @@ app.get('/api/messages/history/:playerId', async (req, res) => {
     try {
         const { playerId } = req.params;
         const limit = parseInt(req.query.limit as string) || 50;
-        
+
         if (!mongoConnected) {
             return res.json([]);
         }
-        
+
         const messages = await mongoPersistence.getMessageHistory(playerId, limit);
         res.json(messages);
     } catch (error) {
@@ -509,11 +469,11 @@ app.get('/api/messages/history/:playerId', async (req, res) => {
 app.get('/api/messages/conversation', async (req, res) => {
     try {
         const { player1, player2, limit } = req.query;
-        
+
         if (!mongoConnected || !player1 || !player2) {
             return res.json([]);
         }
-        
+
         const messages = await mongoPersistence.getConversation(
             player1 as string,
             player2 as string,
@@ -530,11 +490,11 @@ app.get('/api/messages/conversation', async (req, res) => {
 app.get('/api/player/:playerId', async (req, res) => {
     try {
         const { playerId } = req.params;
-        
+
         if (!mongoConnected) {
             return res.status(503).json({ error: 'Database not available' });
         }
-        
+
         const player = await mongoPersistence.getOrCreatePlayer(playerId);
         res.json(player);
     } catch (error) {
@@ -547,11 +507,11 @@ app.put('/api/player/:playerId', async (req, res) => {
     try {
         const { playerId } = req.params;
         const updates = req.body;
-        
+
         if (!mongoConnected) {
             return res.status(503).json({ error: 'Database not available' });
         }
-        
+
         await mongoPersistence.updatePlayer(playerId, updates);
         res.json({ success: true });
     } catch (error) {
@@ -565,11 +525,11 @@ app.post('/api/player/:playerId/stats', postLimiter, async (req, res) => {
     try {
         const { playerId } = req.params;
         const stats = req.body;
-        
+
         if (!mongoConnected) {
             return res.status(503).json({ error: 'Database not available' });
         }
-        
+
         await mongoPersistence.incrementPlayerStats(playerId, stats);
         res.json({ success: true });
     } catch (error) {
@@ -583,11 +543,11 @@ app.post('/api/player/:playerId/achievement', postLimiter, async (req, res) => {
     try {
         const { playerId } = req.params;
         const { achievementId } = req.body;
-        
+
         if (!mongoConnected) {
             return res.status(503).json({ error: 'Database not available' });
         }
-        
+
         await mongoPersistence.addAchievement(playerId, achievementId);
         res.json({ success: true });
     } catch (error) {
@@ -601,11 +561,11 @@ app.get('/api/leaderboard', async (req, res) => {
     try {
         const sortBy = (req.query.sortBy as 'xp' | 'stars' | 'echoesCreated') || 'xp';
         const limit = parseInt(req.query.limit as string) || 10;
-        
+
         if (!mongoConnected) {
             return res.json([]);
         }
-        
+
         const leaderboard = await mongoPersistence.getLeaderboard(sortBy, limit);
         res.json(leaderboard);
     } catch (error) {
@@ -620,7 +580,7 @@ app.get('/api/stats/echoes', async (_req, res) => {
         if (!mongoConnected) {
             return res.json({});
         }
-        
+
         const stats = await mongoPersistence.getEchoStats();
         res.json(stats);
     } catch (error) {
@@ -651,12 +611,12 @@ async function startServer() {
         await mongoPersistence.init(MONGO_URI, MONGO_DB);
         mongoConnected = true;
         console.log('✅ MongoDB connected - persistence enabled');
-        
+
         // Load cached lit stars from database
         const cachedStars = await mongoPersistence.getLitStars();
         cachedStars.forEach(starId => litStars.add(starId));
         console.log(`⭐ Loaded ${cachedStars.length} lit stars from database`);
-        
+
     } catch (error) {
         console.warn('⚠️ MongoDB connection failed - running without persistence');
         console.warn('   Echoes and messages will not be saved');

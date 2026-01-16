@@ -201,18 +201,26 @@ export class Renderer {
     }
 
     renderTethers(player: Player, others: Map<string, OtherPlayer>): void {
-        others.forEach((o, id) => {
-            const b = player.bonds.get(id) || 0;
-            if (b > 18) {
+        others.forEach((o) => {
+            // Use server-provided bond strength, or fall back to local bonds
+            const b = o.bondToViewer ?? (player.bonds.get(o.id) || 0);
+
+            if (b > 0.1) {
                 const dist = Math.hypot(player.x - o.x, player.y - o.y);
                 if (dist < CONFIG.TETHER) {
-                    const a = (b / 100) * (1 - dist / CONFIG.TETHER) * 0.55;
+                    // Non-linear scaling: bonds become visible quickly
+                    // At b=5: ~0.15 opacity. At b=50: ~0.4 opacity. At b=100: ~0.8 opacity
+                    const normalizedBond = Math.min(1, b / 100);
+                    const baseOpacity = 0.1 + Math.pow(normalizedBond, 0.5) * 0.7;
+
+                    const a = baseOpacity * (1 - dist / CONFIG.TETHER);
+
                     this.ctx.globalCompositeOperation = 'lighter';
                     const g = this.ctx.createLinearGradient(player.x, player.y, o.x, o.y);
                     g.addColorStop(0, `hsla(${player.hue},72%,58%,${a})`);
                     g.addColorStop(1, `hsla(${o.hue},72%,58%,${a})`);
                     this.ctx.strokeStyle = g;
-                    this.ctx.lineWidth = 1.2 + b / 35;
+                    this.ctx.lineWidth = 1 + normalizedBond * 2; // Thicker as bond grows
                     this.ctx.beginPath();
                     this.ctx.moveTo(player.x, player.y);
                     this.ctx.lineTo(o.x, o.y);
@@ -224,25 +232,15 @@ export class Renderer {
     }
 
     renderOthers(others: Map<string, OtherPlayer>, player: Player, viewRadius: number): void {
-        // Debug: log what we're rendering
-        if (Math.random() < 0.02) {
-            console.log(`[Renderer] renderOthers called with ${others.size} players`);
-        }
-        
         others.forEach(o => {
             const dx = o.x - player.x;
             const dy = o.y - player.y;
             const dist = Math.hypot(dx, dy);
-            
-            // Debug log
-            if (Math.random() < 0.02) {
-                console.log(`[Renderer] Drawing ${o.name} at (${o.x.toFixed(0)}, ${o.y.toFixed(0)}), dist: ${dist.toFixed(0)}, halo: ${o.halo}, r: ${o.r}, isBot: ${o.isBot}`);
-            }
-            
+
             if (dist > viewRadius + 120) return;
 
             const a = Math.max(0.08, 1 - dist / viewRadius);
-            
+
             // Use slightly different styling for bots
             const isBot = o.isBot || false;
 
@@ -325,6 +323,43 @@ export class Renderer {
                 this.ctx.strokeText(o.name, o.x, o.y - o.r - 12);
                 this.ctx.fillStyle = `rgba(150,180,255,${a * 0.75})`;
                 this.ctx.fillText(o.name, o.x, o.y - o.r - 12);
+
+                // Bot message bubble (when bot is speaking a thought)
+                if (o.message && o.messageTimer && o.messageTimer > 0) {
+                    const msgAlpha = Math.min(1, o.messageTimer / 60) * a; // Fade in/out
+                    const msgY = o.y - o.halo - 35;
+
+                    // Measure text for bubble width
+                    this.ctx.font = '12px Outfit';
+                    const textWidth = this.ctx.measureText(o.message).width;
+                    const padding = 12;
+                    const bubbleWidth = textWidth + padding * 2;
+                    const bubbleHeight = 22;
+
+                    // Draw bubble background
+                    this.ctx.fillStyle = `rgba(30, 40, 60, ${msgAlpha * 0.9})`;
+                    this.ctx.beginPath();
+                    this.ctx.roundRect(
+                        o.x - bubbleWidth / 2,
+                        msgY - bubbleHeight / 2,
+                        bubbleWidth,
+                        bubbleHeight,
+                        8
+                    );
+                    this.ctx.fill();
+
+                    // Draw bubble border
+                    this.ctx.strokeStyle = `rgba(150, 180, 255, ${msgAlpha * 0.5})`;
+                    this.ctx.lineWidth = 1;
+                    this.ctx.stroke();
+
+                    // Draw message text
+                    this.ctx.fillStyle = `rgba(255, 255, 255, ${msgAlpha * 0.95})`;
+                    this.ctx.textAlign = 'center';
+                    this.ctx.textBaseline = 'middle';
+                    this.ctx.fillText(o.message, o.x, msgY);
+                    this.ctx.textBaseline = 'alphabetic';
+                }
             } else {
                 // Real player name styling
                 this.ctx.strokeStyle = `rgba(0,0,0,${a * 0.6})`;

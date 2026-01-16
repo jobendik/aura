@@ -1,9 +1,9 @@
 // MongoDB-backed persistence service for AURA
 // Replaces file-based persistence with proper database storage
 
-import { database, Echo, Message, LitStar, Player } from '../database';
+import { database, Echo, Message, LitStar, Player, Friendship } from '../database';
 // IEcho, IMessage, IPlayer reserved for future type guards
-import type { IEcho as _IEcho, IMessage as _IMessage, IPlayer as _IPlayer } from '../database';
+import type { IEcho as _IEcho, IMessage as _IMessage, IPlayer as _IPlayer, IFriendship as _IFriendship } from '../database';
 
 interface EchoData {
     id: string;
@@ -40,6 +40,10 @@ interface PlayerData {
     level: number;
     stars: number;
     echoesCreated: number;
+    sings: number;
+    pulses: number;
+    emotes: number;
+    teleports: number;
     whispersSent: number;
     connections: number;
     achievements: string[];
@@ -62,6 +66,7 @@ export class MongoPersistenceService {
 
     /**
      * Initialize the persistence service
+     * Attempts connection once - local MongoDB should work immediately or not at all
      */
     async init(mongoUri: string, dbName: string = 'aura'): Promise<void> {
         if (this.initialized) {
@@ -73,7 +78,7 @@ export class MongoPersistenceService {
             uri: mongoUri,
             dbName,
             maxRetries: 3,
-            retryDelay: 5000
+            retryDelay: 1000
         });
 
         this.initialized = true;
@@ -207,7 +212,7 @@ export class MongoPersistenceService {
         const stats = await Echo.aggregate([
             { $group: { _id: '$realm', count: { $sum: 1 } } }
         ]);
-        
+
         const result: Record<string, number> = {};
         for (const stat of stats) {
             result[stat._id] = stat.count;
@@ -394,6 +399,10 @@ export class MongoPersistenceService {
                 level: 1,
                 stars: 0,
                 echoesCreated: 0,
+                sings: 0,
+                pulses: 0,
+                emotes: 0,
+                teleports: 0,
                 whispersSent: 0,
                 connections: 0,
                 achievements: [],
@@ -411,6 +420,10 @@ export class MongoPersistenceService {
             level: player.level,
             stars: player.stars,
             echoesCreated: player.echoesCreated,
+            sings: player.sings || 0,
+            pulses: player.pulses || 0,
+            emotes: player.emotes || 0,
+            teleports: player.teleports || 0,
             whispersSent: player.whispersSent,
             connections: player.connections,
             achievements: player.achievements,
@@ -425,13 +438,17 @@ export class MongoPersistenceService {
      */
     async updatePlayer(playerId: string, updates: Partial<PlayerData>): Promise<void> {
         const updateData: any = { lastSeen: new Date() };
-        
+
         if (updates.name !== undefined) updateData.name = updates.name;
         if (updates.hue !== undefined) updateData.hue = updates.hue;
         if (updates.xp !== undefined) updateData.xp = updates.xp;
         if (updates.level !== undefined) updateData.level = updates.level;
         if (updates.stars !== undefined) updateData.stars = updates.stars;
         if (updates.echoesCreated !== undefined) updateData.echoesCreated = updates.echoesCreated;
+        if (updates.sings !== undefined) updateData.sings = updates.sings;
+        if (updates.pulses !== undefined) updateData.pulses = updates.pulses;
+        if (updates.emotes !== undefined) updateData.emotes = updates.emotes;
+        if (updates.teleports !== undefined) updateData.teleports = updates.teleports;
         if (updates.whispersSent !== undefined) updateData.whispersSent = updates.whispersSent;
         if (updates.connections !== undefined) updateData.connections = updates.connections;
         if (updates.achievements !== undefined) updateData.achievements = updates.achievements;
@@ -453,6 +470,10 @@ export class MongoPersistenceService {
         xp?: number;
         stars?: number;
         echoesCreated?: number;
+        sings?: number;
+        pulses?: number;
+        emotes?: number;
+        teleports?: number;
         whispersSent?: number;
         connections?: number;
     }): Promise<void> {
@@ -460,6 +481,10 @@ export class MongoPersistenceService {
         if (stats.xp) inc.xp = stats.xp;
         if (stats.stars) inc.stars = stats.stars;
         if (stats.echoesCreated) inc.echoesCreated = stats.echoesCreated;
+        if (stats.sings) inc.sings = stats.sings;
+        if (stats.pulses) inc.pulses = stats.pulses;
+        if (stats.emotes) inc.emotes = stats.emotes;
+        if (stats.teleports) inc.teleports = stats.teleports;
         if (stats.whispersSent) inc.whispersSent = stats.whispersSent;
         if (stats.connections) inc.connections = stats.connections;
 
@@ -497,10 +522,98 @@ export class MongoPersistenceService {
             level: p.level,
             stars: p.stars,
             echoesCreated: p.echoesCreated,
+            sings: p.sings || 0,
+            pulses: p.pulses || 0,
+            emotes: p.emotes || 0,
+            teleports: p.teleports || 0,
             whispersSent: p.whispersSent,
             connections: p.connections,
             achievements: p.achievements
         }));
+    }
+
+    // ============================================
+    // FRIENDS SYSTEM
+    // ============================================
+
+    /**
+     * Add a friend relationship
+     */
+    async addFriend(playerId: string, friendId: string, friendName: string): Promise<boolean> {
+        try {
+            await Friendship.findOneAndUpdate(
+                { playerId, friendId },
+                { playerId, friendId, friendName },
+                { upsert: true }
+            );
+            console.log(`👥 ${playerId} added ${friendName} as friend`);
+            return true;
+        } catch (error) {
+            console.error('Failed to add friend:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Remove a friend relationship
+     */
+    async removeFriend(playerId: string, friendId: string): Promise<boolean> {
+        try {
+            const result = await Friendship.deleteOne({ playerId, friendId });
+            return result.deletedCount > 0;
+        } catch (error) {
+            console.error('Failed to remove friend:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Get all friends for a player
+     */
+    async getFriends(playerId: string): Promise<{ friendId: string; friendName: string }[]> {
+        try {
+            const friends = await Friendship.find({ playerId }).lean();
+            return friends.map((f: any) => ({
+                friendId: f.friendId,
+                friendName: f.friendName
+            }));
+        } catch (error) {
+            console.error('Failed to get friends:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Check if two players are friends
+     */
+    async areFriends(playerId: string, friendId: string): Promise<boolean> {
+        try {
+            const friendship = await Friendship.findOne({ playerId, friendId }).lean();
+            return !!friendship;
+        } catch (error) {
+            console.error('Failed to check friendship:', error);
+            return false;
+        }
+    }
+
+    /**
+     * Batch light multiple stars
+     */
+    async litStarsBatch(starIds: string[], realm: string, playerId: string): Promise<number> {
+        try {
+            const operations = starIds.map(starId => ({
+                updateOne: {
+                    filter: { starId },
+                    update: { starId, realm, litBy: playerId, litAt: new Date() },
+                    upsert: true
+                }
+            }));
+            const result = await LitStar.bulkWrite(operations);
+            return result.upsertedCount + result.modifiedCount;
+        } catch (error) {
+            console.error('Failed to batch light stars:', error);
+            return 0;
+        }
     }
 }
 

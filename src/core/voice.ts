@@ -1,6 +1,9 @@
 // WebRTC Voice Chat System
 import type { Settings } from '../types';
 
+// Signal sender function type - can be set externally to use WebSocket
+export type SignalSender = (targetId: string, signalType: string, data: any) => void;
+
 export class VoiceChat {
     enabled: boolean = false;
     localStream: MediaStream | null = null;
@@ -8,11 +11,22 @@ export class VoiceChat {
     analyser: AnalyserNode | null = null;
     peers: Map<string, RTCPeerConnection> = new Map();
     gains: Map<string, GainNode> = new Map();
+    audioElements: Map<string, HTMLAudioElement> = new Map(); // Track audio elements for cleanup
     isSpeaking: boolean = false;
     isPTTActive: boolean = false;
     vadThreshold: number = 0.02;
+    userId: string = '';
+    signalSender: SignalSender | null = null;
     
     constructor(private settings: Settings) {}
+
+    setUserId(id: string): void {
+        this.userId = id;
+    }
+
+    setSignalSender(sender: SignalSender): void {
+        this.signalSender = sender;
+    }
 
     async init(): Promise<boolean> {
         try {
@@ -82,7 +96,7 @@ export class VoiceChat {
         }
     }
 
-    async connectToPeer(peerId: string, db: any, userId: string): Promise<RTCPeerConnection | null> {
+    async connectToPeer(peerId: string): Promise<RTCPeerConnection | null> {
         if (!this.enabled || this.peers.has(peerId)) return null;
 
         const pc = new RTCPeerConnection({
@@ -94,9 +108,17 @@ export class VoiceChat {
         }
 
         pc.ontrack = (event) => {
+            // Clean up existing audio element if any
+            const existingAudio = this.audioElements.get(peerId);
+            if (existingAudio) {
+                existingAudio.srcObject = null;
+                existingAudio.remove();
+            }
+            
             const audio = document.createElement('audio');
             audio.srcObject = event.streams[0];
             audio.autoplay = true;
+            this.audioElements.set(peerId, audio); // Track for cleanup
 
             if (this.audioContext) {
                 const source = this.audioContext.createMediaStreamSource(event.streams[0]);
@@ -109,15 +131,8 @@ export class VoiceChat {
         };
 
         pc.onicecandidate = (event) => {
-            if (event.candidate && db && userId) {
-                db.collection('artifacts').doc('aura-ultimate-v1').collection('public').doc('data')
-                    .collection('signals').add({
-                        from: userId,
-                        to: peerId,
-                        type: 'ice',
-                        candidate: event.candidate.toJSON(),
-                        t: Date.now()
-                    });
+            if (event.candidate && this.signalSender) {
+                this.signalSender(peerId, 'ice', { candidate: event.candidate.toJSON() });
             }
         };
 
@@ -126,26 +141,19 @@ export class VoiceChat {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        if (db && userId) {
-            db.collection('artifacts').doc('aura-ultimate-v1').collection('public').doc('data')
-                .collection('signals').add({
-                    from: userId,
-                    to: peerId,
-                    type: 'offer',
-                    sdp: offer.sdp,
-                    t: Date.now()
-                });
+        if (this.signalSender) {
+            this.signalSender(peerId, 'offer', { sdp: offer.sdp });
         }
 
         return pc;
     }
 
-    async handleSignal(signal: any, db: any, userId: string): Promise<void> {
+    async handleSignal(signal: { from: string; signalType: string; data: any }): Promise<void> {
         if (!this.enabled) return;
 
-        const { from, type, sdp, candidate } = signal;
+        const { from, signalType, data } = signal;
 
-        if (type === 'offer') {
+        if (signalType === 'offer') {
             let pc = this.peers.get(from);
             if (!pc) {
                 pc = new RTCPeerConnection({
@@ -157,9 +165,17 @@ export class VoiceChat {
                 }
 
                 pc.ontrack = (event) => {
+                    // Clean up existing audio element if any
+                    const existingAudio = this.audioElements.get(from);
+                    if (existingAudio) {
+                        existingAudio.srcObject = null;
+                        existingAudio.remove();
+                    }
+                    
                     const audio = document.createElement('audio');
                     audio.srcObject = event.streams[0];
                     audio.autoplay = true;
+                    this.audioElements.set(from, audio); // Track for cleanup
 
                     if (this.audioContext) {
                         const source = this.audioContext.createMediaStreamSource(event.streams[0]);
@@ -171,45 +187,31 @@ export class VoiceChat {
                 };
 
                 pc.onicecandidate = (event) => {
-                    if (event.candidate && db && userId) {
-                        db.collection('artifacts').doc('aura-ultimate-v1').collection('public').doc('data')
-                            .collection('signals').add({
-                                from: userId,
-                                to: from,
-                                type: 'ice',
-                                candidate: event.candidate.toJSON(),
-                                t: Date.now()
-                            });
+                    if (event.candidate && this.signalSender) {
+                        this.signalSender(from, 'ice', { candidate: event.candidate.toJSON() });
                     }
                 };
 
                 this.peers.set(from, pc);
             }
 
-            await pc.setRemoteDescription({ type: 'offer', sdp });
+            await pc.setRemoteDescription({ type: 'offer', sdp: data.sdp });
             const answer = await pc.createAnswer();
             await pc.setLocalDescription(answer);
 
-            if (db && userId) {
-                db.collection('artifacts').doc('aura-ultimate-v1').collection('public').doc('data')
-                    .collection('signals').add({
-                        from: userId,
-                        to: from,
-                        type: 'answer',
-                        sdp: answer.sdp,
-                        t: Date.now()
-                    });
+            if (this.signalSender) {
+                this.signalSender(from, 'answer', { sdp: answer.sdp });
             }
-        } else if (type === 'answer') {
+        } else if (signalType === 'answer') {
             const pc = this.peers.get(from);
             if (pc && pc.signalingState !== 'stable') {
-                await pc.setRemoteDescription({ type: 'answer', sdp });
+                await pc.setRemoteDescription({ type: 'answer', sdp: data.sdp });
             }
-        } else if (type === 'ice' && candidate) {
+        } else if (signalType === 'ice' && data.candidate) {
             const pc = this.peers.get(from);
             if (pc) {
                 try {
-                    await pc.addIceCandidate(candidate);
+                    await pc.addIceCandidate(data.candidate);
                 } catch (e) {
                     console.warn('ICE candidate error:', e);
                 }
@@ -234,6 +236,46 @@ export class VoiceChat {
             this.peers.delete(peerId);
         }
         this.gains.delete(peerId);
+        
+        // Clean up audio element to prevent memory leak
+        const audio = this.audioElements.get(peerId);
+        if (audio) {
+            audio.srcObject = null;
+            audio.remove();
+            this.audioElements.delete(peerId);
+        }
+    }
+
+    /**
+     * Update voice connections based on nearby players
+     * Call this periodically with the list of nearby player IDs
+     */
+    updateNearbyPeers(nearbyPlayerIds: Set<string>, voiceRange: number = 500): void {
+        if (!this.enabled) return;
+
+        // Connect to new nearby players
+        for (const peerId of nearbyPlayerIds) {
+            if (peerId === this.userId) continue;
+            if (!this.peers.has(peerId)) {
+                console.log(`🎙️ Initiating voice connection to ${peerId}`);
+                this.connectToPeer(peerId);
+            }
+        }
+
+        // Disconnect from players no longer nearby
+        for (const peerId of this.peers.keys()) {
+            if (!nearbyPlayerIds.has(peerId)) {
+                console.log(`🔇 Disconnecting voice from ${peerId}`);
+                this.disconnectPeer(peerId);
+            }
+        }
+    }
+
+    /**
+     * Get set of connected peer IDs
+     */
+    getConnectedPeers(): Set<string> {
+        return new Set(this.peers.keys());
     }
 
     disable(): void {
@@ -248,6 +290,13 @@ export class VoiceChat {
         this.peers.forEach(pc => pc.close());
         this.peers.clear();
         this.gains.clear();
+        
+        // Clean up all audio elements to prevent memory leaks
+        this.audioElements.forEach(audio => {
+            audio.srcObject = null;
+            audio.remove();
+        });
+        this.audioElements.clear();
     }
 
     // Event callbacks

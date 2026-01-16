@@ -26,6 +26,14 @@ export interface BasePlayer {
 }
 
 /**
+ * Bond connection between two entities
+ */
+export interface BondData {
+    strength: number;  // 0-100
+    lastInteraction: number;  // timestamp
+}
+
+/**
  * Player state as stored on server
  */
 export interface ServerPlayer extends BasePlayer {
@@ -35,6 +43,7 @@ export interface ServerPlayer extends BasePlayer {
     pulsing?: number;
     emoting?: string | null;
     isBot?: boolean;
+    bonds?: Record<string, BondData>;  // Bonds to other players/bots
 }
 
 /**
@@ -146,10 +155,10 @@ export interface StarLitEvent extends BaseNetworkEvent {
 /**
  * Union of all network events
  */
-export type NetworkEvent = 
-    | WhisperEvent 
-    | SingEvent 
-    | PulseEvent 
-    | EchoEvent 
-    | EmoteEvent 
+export type NetworkEvent =
+    | WhisperEvent
+    | SingEvent
+    | PulseEvent
+    | EchoEvent
+    | EmoteEvent
     | StarLitEvent;

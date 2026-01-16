@@ -226,6 +226,10 @@ export interface IPlayer extends Document {
     level: number;
     stars: number;           // Total stars lit
     echoesCreated: number;   // Total echoes planted
+    sings: number;           // Total sings performed
+    pulses: number;          // Total pulses performed
+    emotes: number;          // Total emotes used
+    teleports: number;       // Total teleports used
     whispersSent: number;    // Total whispers sent
     connections: number;     // Total connections made
     achievements: string[];  // Unlocked achievement IDs
@@ -283,6 +287,26 @@ const PlayerSchema = new Schema<IPlayer>({
         default: 0,
         min: 0
     },
+    sings: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    pulses: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    emotes: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
+    teleports: {
+        type: Number,
+        default: 0,
+        min: 0
+    },
     whispersSent: {
         type: Number,
         default: 0,
@@ -324,6 +348,44 @@ export const Player: Model<IPlayer> = mongoose.model<IPlayer>('Player', PlayerSc
 
 
 // ============================================
+// FRIENDSHIP MODEL - Friend relationships
+// ============================================
+
+export interface IFriendship extends Document {
+    playerId: string;        // Player who added the friend
+    friendId: string;        // The friend's player ID
+    friendName: string;      // Friend's display name (cached)
+    createdAt: Date;
+}
+
+const FriendshipSchema = new Schema<IFriendship>({
+    playerId: {
+        type: String,
+        required: true,
+        index: true
+    },
+    friendId: {
+        type: String,
+        required: true,
+        index: true
+    },
+    friendName: {
+        type: String,
+        required: true,
+        maxlength: 30
+    }
+}, {
+    timestamps: true,
+    collection: 'friendships'
+});
+
+// Compound unique index - one friendship per pair per direction
+FriendshipSchema.index({ playerId: 1, friendId: 1 }, { unique: true });
+
+export const Friendship: Model<IFriendship> = mongoose.model<IFriendship>('Friendship', FriendshipSchema);
+
+
+// ============================================
 // EXPORT ALL MODELS
 // ============================================
 
@@ -331,5 +393,6 @@ export default {
     Echo,
     Message,
     LitStar,
-    Player
+    Player,
+    Friendship
 };

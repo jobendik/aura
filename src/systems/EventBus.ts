@@ -13,7 +13,7 @@ interface EventMap {
     'player:echo': { text: string };
     'player:levelUp': { oldLevel: number; newLevel: number };
     'player:xpGain': { amount: number };
-    
+
     // UI events
     'ui:showPanel': { panel: 'social' | 'achievements' | 'settings' | 'quests' };
     'ui:hidePanel': { panel: string };
@@ -26,21 +26,21 @@ interface EventMap {
     'ui:hideEmoteWheel': void;
     'ui:toast': { message: string; type?: string };
     'ui:updateHUD': void;
-    
+
     // Game events
     'game:start': void;
     'game:pause': void;
     'game:resume': void;
     'game:realmChange': { realmId: string };
     'game:starLit': { starId: string; count: number };
-    
+
     // Network events
     'network:connected': void;
     'network:disconnected': void;
     'network:playerJoined': { player: any };
     'network:playerLeft': { playerId: string };
     'network:playerUpdate': { player: any; isSelf: boolean };
-    'network:worldState': { entities: any[]; litStars: string[]; echoes: any[]; timestamp: number };
+    'network:worldState': { entities: any[]; litStars: string[]; echoes: any[]; linkedCount: number; timestamp: number };
     'network:syncComplete': void;
     'network:error': { error: Error };
     // Server-authoritative action events (broadcast to all including sender)
@@ -50,17 +50,28 @@ interface EventMap {
     'network:echo': { playerId: string; playerName: string; text: string; x: number; y: number; hue: number; isSelf: boolean };
     'network:whisper': { from: string; fromName: string; text: string; targetId?: string; x: number; y: number };
     'network:starLit': { playerId: string; starIds: string[]; x: number; y: number; isSelf: boolean };
-    
+    'network:connectionMade': { player1Id: string; player1Name: string; player2Id: string; player2Name: string; isSelf: boolean };
+    // Server-authoritative player data
+    'network:playerData': { id: string; name: string; hue: number; xp: number; level: number; stars: number; echoes: number; sings: number; pulses: number; emotes: number; teleports: number; achievements: string[]; friends: { id: string; name: string }[]; lastRealm?: string; lastPosition?: { x: number; y: number } };
+    'network:xpGain': { amount: number; reason: string; newXp: number; newLevel: number; leveledUp: boolean };
+    'network:cooldown': { action: string; remainingMs: number };
+    // Friends system
+    'network:friendAdded': { friendId: string; friendName: string };
+    'network:friendRemoved': { friendId: string };
+    'network:teleportSuccess': { x: number; y: number; friendId: string; friendName: string };
+    // Voice signaling
+    'network:voiceSignal': { fromId: string; fromName: string; signalType: string; signalData: any };
+
     // Voice events
     'voice:enabled': void;
     'voice:disabled': void;
     'voice:speaking': { speaking: boolean };
     'voice:volumeUpdate': { level: number };
-    
+
     // Bot events
     'bot:spawned': { bot: any };
     'bot:removed': { botId: string };
-    
+
     // Achievement/Quest events
     'achievement:unlocked': { achievementId: string };
     'quest:completed': { questId: string };
@@ -86,7 +97,7 @@ class EventBusImpl {
             this.listeners.set(event, new Set());
         }
         this.listeners.get(event)!.add(callback);
-        
+
         return () => {
             this.listeners.get(event)?.delete(callback);
         };
@@ -103,7 +114,7 @@ class EventBusImpl {
             this.onceListeners.set(event, new Set());
         }
         this.onceListeners.get(event)!.add(callback);
-        
+
         return () => {
             this.onceListeners.get(event)?.delete(callback);
         };
@@ -163,10 +174,10 @@ class EventBusImpl {
      */
     getListenerCount(event?: keyof EventMap): number {
         if (event) {
-            return (this.listeners.get(event)?.size || 0) + 
-                   (this.onceListeners.get(event)?.size || 0);
+            return (this.listeners.get(event)?.size || 0) +
+                (this.onceListeners.get(event)?.size || 0);
         }
-        
+
         let total = 0;
         for (const listeners of this.listeners.values()) {
             total += listeners.size;

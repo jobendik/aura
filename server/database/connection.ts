@@ -14,7 +14,7 @@ class DatabaseConnection {
     // @ts-ignore Reserved for future database configuration
     private config: DatabaseConfig | null = null;
 
-    private constructor() {}
+    private constructor() { }
 
     static getInstance(): DatabaseConnection {
         if (!DatabaseConnection.instance) {
@@ -28,40 +28,36 @@ class DatabaseConnection {
      */
     async connect(config: DatabaseConfig): Promise<void> {
         if (this.isConnected) {
-            console.log('🔌 Already connected to MongoDB');
             return;
         }
 
         this.config = config;
-        const maxRetries = config.maxRetries || 3;
-        const retryDelay = config.retryDelay || 5000;
+        const maxRetries = config.maxRetries || 1;
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                console.log(`🔌 Connecting to MongoDB (attempt ${attempt}/${maxRetries})...`);
-                
                 await mongoose.connect(config.uri, {
                     dbName: config.dbName,
                     maxPoolSize: 10,
-                    serverSelectionTimeoutMS: 5000,
+                    serverSelectionTimeoutMS: 5000,  // Increased timeout for local MongoDB
                     socketTimeoutMS: 45000,
                 });
 
                 this.isConnected = true;
-                console.log('✅ Connected to MongoDB successfully');
-                
+                console.log('✅ Connected to MongoDB');
+
                 // Set up connection event handlers
                 this.setupEventHandlers();
                 return;
 
             } catch (error) {
-                console.error(`❌ MongoDB connection attempt ${attempt} failed:`, error);
-                
-                if (attempt < maxRetries) {
-                    console.log(`⏳ Retrying in ${retryDelay / 1000}s...`);
-                    await this.delay(retryDelay);
-                } else {
-                    throw new Error(`Failed to connect to MongoDB after ${maxRetries} attempts`);
+                console.warn(`⚠️ MongoDB connection attempt ${attempt}/${maxRetries} failed:`, (error as Error).message);
+                if (attempt >= maxRetries) {
+                    console.error('❌ Could not connect to MongoDB. Is the "mongod" service running?');
+                    throw new Error('MongoDB connection failed');
+                }
+                if (config.retryDelay) {
+                    await this.delay(config.retryDelay);
                 }
             }
         }
