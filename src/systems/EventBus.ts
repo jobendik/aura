@@ -5,7 +5,7 @@ type UnsubscribeFn = () => void;
 
 interface EventMap {
     // Player actions
-    'player:move': { x: number; y: number };
+    'player:move': { x: number; y: number; distance?: number };
     'player:sing': void;
     'player:pulse': void;
     'player:emote': { emote: string };
@@ -79,6 +79,47 @@ interface EventMap {
     'achievement:unlocked': { achievementId: string };
     'quest:completed': { questId: string };
     'quest:progress': { questId: string; progress: number };
+
+    // Addiction system events
+    'addiction:firstVisit': void;
+    'addiction:streakIncreased': { streak: number; bonus: { multiplier: number; title: string } };
+    'addiction:streakProtected': { streak: number };
+    'addiction:streakLost': { lostStreak: number };
+    'addiction:giftSpawned': { gift: any };
+    'addiction:giftExpired': { gift: any };
+    'addiction:giftCollected': { gift: any };
+    'addiction:mysterySpawned': { mystery: any };
+    'addiction:mysteryDeparted': { mystery: any };
+    'addiction:pendingAdded': { interaction: any };
+
+    // Mobile control events
+    'mobile:action': { action: string };
+    'mobile:joystick': { dx: number; dy: number; magnitude: number };
+    'mobile:tap': { x: number; y: number };
+    'mobile:doubleTap': { x: number; y: number; action: string };
+    'mobile:longPress': { x: number; y: number };
+    'mobile:swipe': { direction: 'left' | 'right' | 'up' | 'down'; velocity: number };
+
+    // Engagement system events (limited-time events)
+    'event:started': { eventId: string; eventName: string };
+    'event:ended': { eventId: string; eventName: string };
+    
+    // Push notifications events
+    'notifications:enabled': void;
+    
+    // Social interaction events
+    'player:waveReceived': { fromId: string; fromName: string };
+    
+    // Beginner luck events
+    'beginner:bonus': { xp: number; reason: string };
+    
+    // Cosmetics events
+    'cosmetic:equipped': { category: string; cosmeticId: string };
+    'cosmetic:unlocked': { cosmeticId: string; name: string };
+    
+    // Challenge events
+    'player:wave': void;
+    'player:bond': void;
 }
 
 /**

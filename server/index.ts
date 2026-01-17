@@ -180,6 +180,29 @@ app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: Date.now() });
 });
 
+// Status endpoint for loading screen (returns online count)
+app.get('/aura/status', (_req, res) => {
+    const now = Date.now();
+    
+    // Count active players across all realms
+    let activeCount = 0;
+    for (const p of players.values()) {
+        if (now - p.lastSeen < PLAYER_TIMEOUT) {
+            activeCount++;
+        }
+    }
+    
+    // Add bot count for social proof
+    const botCount = bots.size;
+    
+    res.json({
+        onlineCount: activeCount + botCount,
+        playerCount: activeCount,
+        botCount: botCount,
+        timestamp: now
+    });
+});
+
 // Player endpoints
 app.get('/api/players', (req, res) => {
     try {

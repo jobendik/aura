@@ -1827,7 +1827,72 @@ canvas {
     letter-spacing: 0.3em;
     color: var(--text-muted);
     text-transform: uppercase;
-    margin-bottom: 48px;
+    margin-bottom: 24px;
+}
+
+/* Live Activity Counter on Loading Screen */
+#loading-live {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px;
+    background: rgba(74, 222, 128, 0.08);
+    border: 1px solid rgba(74, 222, 128, 0.2);
+    border-radius: var(--radius-full);
+    margin-bottom: 36px;
+    animation: pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes pulse-glow {
+    0%, 100% {
+        box-shadow: 0 0 20px rgba(74, 222, 128, 0.1);
+    }
+    50% {
+        box-shadow: 0 0 30px rgba(74, 222, 128, 0.2);
+    }
+}
+
+.live-pulse {
+    width: 8px;
+    height: 8px;
+    background: var(--success);
+    border-radius: 50%;
+    animation: live-blink 1.5s ease-in-out infinite;
+}
+
+@keyframes live-blink {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.9); }
+}
+
+#loading-live-count {
+    font-weight: 700;
+    font-size: 1.1rem;
+    color: var(--success);
+}
+
+#loading-live-text {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+/* Social proof on loading screen */
+#loading-social-proof {
+    margin-top: 32px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#loading-social-proof span:first-child {
+    font-size: 1rem;
+}
+
+#loading-countries {
+    font-weight: 600;
+    color: var(--accent);
 }
 
 #loading-features {

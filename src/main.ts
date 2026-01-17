@@ -12,6 +12,26 @@ import { PersistenceManager } from './core/persistence';
 import { Star, Echo, Projectile, Particle, FloatingText, PowerUp } from './game/entities';
 import type { Player, Camera, Settings, GameState, OtherPlayer, Stats, DailyProgress, WeeklyProgress, TagGameState, PowerUpType } from './types';
 
+// Engagement/Addiction Systems - sounds module auto-initializes via EventBus
+import './core/sounds';  // Side-effect import: initializes sound events
+import './ui/loading-screen';  // Side-effect import: initializes loading screen enhancements
+import { initEngagementSystems, getActiveGifts, getMysteryEncounters, collectGift, getStreakMultiplier, cleanupEngagementSystems } from './systems/engagement-integration';
+import { beginnerLuck } from './systems/beginner-luck';
+import { pushNotifications } from './systems/push-notifications';
+import { dailySpin } from './systems/spin-wheel';
+import { cosmetics } from './systems/cosmetics';
+import { leaderboard } from './systems/leaderboard';
+import { challenges } from './systems/challenges';
+
+// Mark as used for future rendering integration (will render gifts/mysteries in game loop)
+void getActiveGifts;
+void getMysteryEncounters;
+void collectGift;
+void getStreakMultiplier;
+void cleanupEngagementSystems;
+void cosmetics;
+void challenges;
+
 // Initialize game state
 const settings: Settings = {
     music: true,
@@ -196,6 +216,30 @@ function setupUI(): void {
         audio.startAmbientLoop(); // Start ambient sparkle sounds for atmosphere
         gameState.gameActive = true;
         startGame();
+
+        // Initialize engagement/addiction systems for maximum retention
+        initEngagementSystems(
+            () => ({ x: player.x, y: player.y }),
+            () => others.size + 1  // +1 for self
+        );
+        
+        // Start beginner's luck for new players (3x XP for 5 minutes)
+        beginnerLuck.start();
+        
+        // Show engagement buttons (daily spin, leaderboard, challenges)
+        setTimeout(() => {
+            dailySpin.showSpinButton();
+            leaderboard.showLeaderboardButton();
+            challenges.showChallengesButton();
+        }, 2000);  // Show after 2 seconds to not overwhelm
+        
+        // Request notification permission after 2 minutes of play
+        // (better opt-in rate when asked after positive experience)
+        setTimeout(() => {
+            if (!pushNotifications.isEnabled()) {
+                pushNotifications.requestPermission('achievement');
+            }
+        }, 120000);
     });
 
     // Action buttons
@@ -571,7 +615,7 @@ function setupUI(): void {
             gameState.selectedId = clicked;
             const clickedPlayer = others.get(clicked)!;
             UIManager.showProfile(clickedPlayer, e.clientX, e.clientY);
-            
+
             // Also show the inspiration4-style click profile card
             showClickProfileCard(clickedPlayer, e.clientX, e.clientY);
             // Don't move when clicking on players/bots
@@ -639,7 +683,7 @@ function handleMouseMove(e: MouseEvent): void {
         player.tx = worldX;
         player.ty = worldY;
     }
-    
+
     // Hover tooltip - show preview when hovering over players/bots
     let hoveredPlayer: OtherPlayer | null = null;
     for (const [, other] of others) {
@@ -649,7 +693,7 @@ function handleMouseMove(e: MouseEvent): void {
             break;
         }
     }
-    
+
     updateHoverTooltip(hoveredPlayer, e.clientX, e.clientY);
 }
 
@@ -792,7 +836,7 @@ function createEcho(text: string): void {
     // 100% Server-authoritative: Only send request, effects happen on broadcast
     if (wsClient.isConnected()) {
         wsClient.sendEcho(player, text);
-        
+
         // Message recoil (inspiration3) - nudge player backward
         applyMessageRecoil();
     } else {
@@ -916,16 +960,16 @@ let currentClickProfileTarget: OtherPlayer | null = null;
 function showClickProfileCard(other: OtherPlayer, screenX: number, screenY: number): void {
     const card = document.getElementById('click-profile-card');
     if (!card) return;
-    
+
     currentClickProfileTarget = other;
-    
+
     // Update card content
     const dot = document.getElementById('cpc-dot');
     const name = document.getElementById('cpc-name');
     const age = document.getElementById('cpc-age');
     const stars = document.getElementById('cpc-stars');
     const bond = document.getElementById('cpc-bond');
-    
+
     if (dot) {
         dot.style.backgroundColor = `hsl(${other.hue}, 70%, 60%)`;
         dot.style.boxShadow = `0 0 10px hsla(${other.hue}, 70%, 60%, 0.6)`;
@@ -937,13 +981,13 @@ function showClickProfileCard(other: OtherPlayer, screenX: number, screenY: numb
     }
     if (stars) stars.textContent = (other.stars || 0).toString();
     if (bond) bond.textContent = `${Math.round(other.bondToViewer || 0)}%`;
-    
+
     // Update additional fields
     const level = document.getElementById('cpc-level');
     const xp = document.getElementById('cpc-xp');
     if (level) level.textContent = `Lv ${GameLogic.getLevel(other.xp || 0)}`;
     if (xp) xp.textContent = (other.xp || 0).toString();
-    
+
     // Update friend button text based on friend status
     const friendBtn = document.getElementById('cpc-friend');
     if (friendBtn) {
@@ -951,7 +995,7 @@ function showClickProfileCard(other: OtherPlayer, screenX: number, screenY: numb
         friendBtn.textContent = isFriend ? '✓ Friends' : '⭐ Add Friend';
         (friendBtn as HTMLButtonElement).disabled = isFriend;
     }
-    
+
     // Position card
     card.style.left = `${screenX}px`;
     card.style.top = `${screenY}px`;
@@ -968,29 +1012,29 @@ function hideClickProfileCard(): void {
 function updateHoverTooltip(other: OtherPlayer | null, screenX: number, screenY: number): void {
     const tooltip = document.getElementById('hover-tooltip');
     if (!tooltip) return;
-    
+
     // Don't show tooltip if click profile card is open
     if (currentClickProfileTarget) {
         tooltip.classList.remove('visible');
         return;
     }
-    
+
     if (other) {
         const dot = document.getElementById('ht-dot');
         const name = document.getElementById('ht-name');
         const level = document.getElementById('ht-level');
-        
+
         if (dot) {
             dot.style.backgroundColor = `hsl(${other.hue}, 70%, 60%)`;
             dot.style.boxShadow = `0 0 6px hsla(${other.hue}, 70%, 60%, 0.6)`;
         }
         if (name) name.textContent = other.name;
         if (level) level.textContent = `Lv ${GameLogic.getLevel(other.xp || 0)}`;
-        
+
         tooltip.style.left = `${screenX}px`;
         tooltip.style.top = `${screenY - 10}px`;
         tooltip.classList.add('visible');
-        
+
         // Change cursor to pointer
         canvas.style.cursor = 'pointer';
     } else {
@@ -1025,7 +1069,7 @@ document.getElementById('cpc-invite')?.addEventListener('click', () => {
     // Generate invite URL based on current player position
     const seedVal = Math.floor(player.x) + Math.floor(player.y) * 10000;
     const url = `${window.location.origin}${window.location.pathname}?seed=${seedVal}`;
-    
+
     // Copy to clipboard
     navigator.clipboard.writeText(url).then(() => {
         showInviteToast();
@@ -1033,7 +1077,7 @@ document.getElementById('cpc-invite')?.addEventListener('click', () => {
         // Fallback
         prompt('Copy your orbit link:', url);
     });
-    
+
     hideClickProfileCard();
 });
 
@@ -1068,18 +1112,18 @@ function fadeHintPill(): void {
 function updateSignalHUD(latency: number, connected: boolean): void {
     const valEl = document.getElementById('signal-val');
     if (!valEl) return;
-    
+
     if (!connected) {
         valEl.textContent = 'OFFLINE';
         valEl.className = 'disconnected';
         return;
     }
-    
+
     // Convert latency to "signal strength" percentage
     // 0ms = 100%, 500ms+ = 0%
     const strength = Math.max(0, Math.min(100, Math.round(100 - (latency / 5))));
     valEl.textContent = `${strength}%`;
-    
+
     // Color based on quality
     if (strength >= 70) {
         valEl.className = '';  // Default accent color (good)
@@ -1159,15 +1203,15 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
         // Stars require 2+ connected players nearby to ignite
         const IGNITION_DIST = 120;  // Distance to be "near" a star
         const TETHER_DIST = 220;    // Distance for players to be "connected"
-        
+
         // Find all nearby players (including bots) within tether range
-        const nearbyOthers = Array.from(others.values()).filter(o => 
+        const nearbyOthers = Array.from(others.values()).filter(o =>
             Math.hypot(o.x - player.x, o.y - player.y) <= TETHER_DIST
         );
-        
+
         // Light stars if there's at least 1 nearby connected player (2 total including self)
         const hasConnection = nearbyOthers.length >= 1;
-        
+
         const viewRadius = GameLogic.getViewRadius(player);
         let lit = 0;
         const litStarIds: string[] = [];
@@ -1176,27 +1220,27 @@ function applyPulseEffect(playerId: string, x: number, y: number): void {
             if (!k.startsWith(gameState.currentRealm + ':')) continue;
             for (const s of arr) {
                 if (s.lit) continue;
-                
+
                 const distToStar = Math.hypot(s.x - x, s.y - y);
-                
+
                 // Star must be within pulse range
                 if (distToStar >= viewRadius * 1.8) continue;
-                
+
                 // === Graph ignition check ===
                 // Count how many players (including self) are near this star AND connected
                 let playersNearStar = distToStar < IGNITION_DIST ? 1 : 0; // Self
-                
+
                 for (const other of nearbyOthers) {
                     const otherDistToStar = Math.hypot(s.x - other.x, s.y - other.y);
                     if (otherDistToStar < IGNITION_DIST) {
                         playersNearStar++;
                     }
                 }
-                
+
                 // Require 2+ connected players near the star to ignite
                 // OR allow solo ignition if no one is nearby at all (for solo play)
                 const canIgnite = playersNearStar >= 2 || (!hasConnection && playersNearStar >= 1);
-                
+
                 if (canIgnite) {
                     s.lit = true;
                     s.burst = 1;
@@ -1260,7 +1304,7 @@ function applyEmoteEffect(playerId: string, emoji: string, x: number, y: number)
 function applyMessageRecoil(targetX?: number, targetY?: number): void {
     const RECOIL_FORCE = 8;
     let dx: number, dy: number;
-    
+
     if (targetX !== undefined && targetY !== undefined) {
         // Recoil away from target
         const dist = Math.hypot(targetX - player.x, targetY - player.y);
@@ -1282,7 +1326,7 @@ function applyMessageRecoil(targetX?: number, targetY?: number): void {
                 nearest = other;
             }
         }
-        
+
         if (nearest && minDist < 500) {
             dx = -(nearest.x - player.x) / minDist;
             dy = -(nearest.y - player.y) / minDist;
@@ -1293,7 +1337,7 @@ function applyMessageRecoil(targetX?: number, targetY?: number): void {
             dy = Math.sin(angle);
         }
     }
-    
+
     // Apply recoil to target position
     player.tx += dx * RECOIL_FORCE;
     player.ty += dy * RECOIL_FORCE;
@@ -2153,7 +2197,7 @@ function update(): void {
     }
 
     // Update ambient drone based on nearby count (inspiration4)
-    const nearbyCount = Array.from(others.values()).filter(o => 
+    const nearbyCount = Array.from(others.values()).filter(o =>
         Math.hypot(o.x - player.x, o.y - player.y) < 500
     ).length;
     audio.updateDroneProximity(nearbyCount);
@@ -2275,7 +2319,7 @@ function render(): void {
     renderer.restore();
 
     // Update cluster HUD with nearby count
-    const nearbyCount = Array.from(others.values()).filter(o => 
+    const nearbyCount = Array.from(others.values()).filter(o =>
         Math.hypot(o.x - player.x, o.y - player.y) < 400
     ).length;
     const clusterHud = document.getElementById('cluster-hud');
@@ -2349,7 +2393,7 @@ async function toggleVoice(): Promise<void> {
             voiceChat.onSpeakingChange = (speaking) => {
                 gameState.isSpeaking = speaking;
                 updateVoiceUI();
-                
+
                 // Broadcast speaking state to server for other players to see
                 wsClient.send({
                     type: 'speaking',

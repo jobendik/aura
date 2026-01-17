@@ -961,13 +961,13 @@ export class Renderer {
             g.addColorStop(0, color.replace(')', `,${0.6 * a})`).replace('rgb', 'rgba'));
             g.addColorStop(0.4, color.replace(')', `,${0.2 * a})`).replace('rgb', 'rgba'));
             g.addColorStop(1, 'rgba(0,0,0,0)');
-            
+
             // Use hex to rgba conversion
             const hexColor = color;
             const r = parseInt(hexColor.slice(1, 3), 16);
             const gVal = parseInt(hexColor.slice(3, 5), 16);
             const b = parseInt(hexColor.slice(5, 7), 16);
-            
+
             const glow = this.ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 3.5 * pulse);
             glow.addColorStop(0, `rgba(${r},${gVal},${b},${0.7 * a})`);
             glow.addColorStop(0.5, `rgba(${r},${gVal},${b},${0.25 * a})`);
@@ -1020,7 +1020,7 @@ export class Renderer {
         if (isIt) {
             // Self is IT - draw warning overlay
             this.ctx.save();
-            
+
             // Red vignette edge
             const vignette = this.ctx.createRadialGradient(
                 this.W / 2, this.H / 2, this.W * 0.3,
@@ -1039,7 +1039,7 @@ export class Renderer {
             this.ctx.lineWidth = 3;
             this.ctx.strokeText('👑 YOU ARE IT!', this.W / 2, 80);
             this.ctx.fillText('👑 YOU ARE IT!', this.W / 2, 80);
-            
+
             this.ctx.restore();
         } else if (itPlayer) {
             // Show arrow pointing to IT player if they're far away
@@ -1081,7 +1081,7 @@ export class Renderer {
             // Safe glow effect (green edge)
             const safeTime = tagState.survivalTime;
             const pulseIntensity = Math.sin(safeTime * 2) * 0.02 + 0.05;
-            
+
             const safeGlow = this.ctx.createRadialGradient(
                 this.W / 2, this.H / 2, this.W * 0.4,
                 this.W / 2, this.H / 2, this.W * 0.7
@@ -1102,22 +1102,22 @@ export class Renderer {
         // Speed lines radiating from player
         const lineCount = 8;
         const time = Date.now() / 100;
-        
+
         this.ctx.globalCompositeOperation = 'lighter';
         for (let i = 0; i < lineCount; i++) {
             const angle = (i / lineCount) * Math.PI * 2 + time * 0.1;
             const len = 40 + Math.sin(time + i) * 20;
             const startDist = player.halo + 5;
-            
+
             const x1 = player.x + Math.cos(angle) * startDist;
             const y1 = player.y + Math.sin(angle) * startDist;
             const x2 = player.x + Math.cos(angle) * (startDist + len);
             const y2 = player.y + Math.sin(angle) * (startDist + len);
-            
+
             const gradient = this.ctx.createLinearGradient(x1, y1, x2, y2);
             gradient.addColorStop(0, `rgba(255, 215, 0, ${boostAmount * 0.6})`);
             gradient.addColorStop(1, 'rgba(255, 215, 0, 0)');
-            
+
             this.ctx.strokeStyle = gradient;
             this.ctx.lineWidth = 2;
             this.ctx.beginPath();
@@ -1126,5 +1126,215 @@ export class Renderer {
             this.ctx.stroke();
         }
         this.ctx.globalCompositeOperation = 'source-over';
+    }
+
+    /**
+     * Render cosmic gifts (addiction system collectibles)
+     */
+    renderCosmicGifts(gifts: { id: string; type: string; rarity: string; x: number; y: number; expiresAt: number; collected: boolean }[], player: { x: number; y: number }, viewRadius: number): void {
+        const now = Date.now();
+
+        for (const gift of gifts) {
+            if (gift.collected) continue;
+
+            const dx = gift.x - player.x;
+            const dy = gift.y - player.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > viewRadius + 150) continue;
+
+            const a = Math.max(0.4, 1 - dist / viewRadius);
+            const timeRemaining = gift.expiresAt - now;
+            const pulse = 1 + Math.sin(now / 200) * 0.15;
+
+            // Get rarity colors
+            let baseColor: [number, number, number] = [255, 255, 255];  // common
+            let glowIntensity = 0.3;
+
+            if (gift.rarity === 'rare') {
+                baseColor = [125, 211, 252];  // cyan
+                glowIntensity = 0.5;
+            } else if (gift.rarity === 'epic') {
+                baseColor = [196, 181, 253];  // purple
+                glowIntensity = 0.7;
+            } else if (gift.rarity === 'legendary') {
+                baseColor = [251, 191, 36];  // gold
+                glowIntensity = 1.0;
+            }
+
+            const [r, g, b] = baseColor;
+            const radius = 18 * pulse;
+
+            // Outer glow
+            this.ctx.globalCompositeOperation = 'lighter';
+            const glow = this.ctx.createRadialGradient(gift.x, gift.y, 0, gift.x, gift.y, radius * 3);
+            glow.addColorStop(0, `rgba(${r},${g},${b},${glowIntensity * a})`);
+            glow.addColorStop(0.5, `rgba(${r},${g},${b},${glowIntensity * 0.3 * a})`);
+            glow.addColorStop(1, 'rgba(0,0,0,0)');
+            this.ctx.fillStyle = glow;
+            this.ctx.beginPath();
+            this.ctx.arc(gift.x, gift.y, radius * 3, 0, Math.PI * 2);
+            this.ctx.fill();
+            this.ctx.globalCompositeOperation = 'source-over';
+
+            // Core
+            this.ctx.fillStyle = `rgba(${r},${g},${b},${a})`;
+            this.ctx.shadowColor = `rgb(${r},${g},${b})`;
+            this.ctx.shadowBlur = 20 * pulse;
+            this.ctx.beginPath();
+            this.ctx.arc(gift.x, gift.y, radius, 0, Math.PI * 2);
+            this.ctx.fill();
+            this.ctx.shadowBlur = 0;
+
+            // Icon based on type
+            let icon = '🎁';
+            if (gift.type === 'xp') icon = '⚡';
+            else if (gift.type === 'cosmetic') icon = '✨';
+            else if (gift.type === 'boost') icon = '🚀';
+            else if (gift.type === 'mystery') icon = '🔮';
+
+            this.ctx.font = `${14 * pulse}px sans-serif`;
+            this.ctx.textAlign = 'center';
+            this.ctx.textBaseline = 'middle';
+            this.ctx.fillText(icon, gift.x, gift.y);
+            this.ctx.textBaseline = 'alphabetic';
+
+            // Timer ring (shows time remaining)
+            if (timeRemaining < 15000) {  // Last 15 seconds
+                const timerRatio = timeRemaining / 15000;
+                this.ctx.strokeStyle = `rgba(${r},${g},${b},${0.7 * a})`;
+                this.ctx.lineWidth = 3;
+                this.ctx.beginPath();
+                this.ctx.arc(gift.x, gift.y, radius + 8, -Math.PI / 2, -Math.PI / 2 + timerRatio * Math.PI * 2);
+                this.ctx.stroke();
+            }
+
+            // Legendary sparkles
+            if (gift.rarity === 'legendary') {
+                for (let i = 0; i < 6; i++) {
+                    const sparkleAngle = (now / 500 + i * Math.PI / 3) % (Math.PI * 2);
+                    const sparkleX = gift.x + Math.cos(sparkleAngle) * (radius + 15);
+                    const sparkleY = gift.y + Math.sin(sparkleAngle) * (radius + 15);
+                    const sparkleSize = 2 + Math.sin(now / 100 + i) * 1;
+
+                    this.ctx.globalCompositeOperation = 'lighter';
+                    this.ctx.fillStyle = `rgba(${r},${g},${b},${0.8 * a})`;
+                    this.ctx.beginPath();
+                    this.ctx.arc(sparkleX, sparkleY, sparkleSize, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    this.ctx.globalCompositeOperation = 'source-over';
+                }
+            }
+        }
+    }
+
+    /**
+     * Render mystery encounters (rare NPC souls)
+     */
+    renderMysteryEncounters(mysteries: { id: string; type: string; name: string; x: number; y: number; hue: number; rarity: string; spawnedAt: number; duration: number }[], player: { x: number; y: number }, viewRadius: number): void {
+        const now = Date.now();
+
+        for (const mystery of mysteries) {
+            const timeAlive = now - mystery.spawnedAt;
+            if (timeAlive >= mystery.duration) continue;
+
+            const dx = mystery.x - player.x;
+            const dy = mystery.y - player.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist > viewRadius + 200) continue;
+
+            const a = Math.max(0.3, 1 - dist / viewRadius);
+            const fadeIn = Math.min(1, timeAlive / 1000);  // 1s fade in
+            const fadeOut = Math.min(1, (mystery.duration - timeAlive) / 2000);  // 2s fade out
+            const alpha = a * fadeIn * fadeOut;
+
+            const pulse = 1 + Math.sin(now / 300) * 0.1;
+            const rotate = (now / 5000) * Math.PI * 2;  // Slow rotation
+
+            // Determine size and effects by rarity
+            let baseRadius = 22;
+            let auraLayers = 2;
+            if (mystery.rarity === 'epic') {
+                baseRadius = 26;
+                auraLayers = 3;
+            } else if (mystery.rarity === 'legendary') {
+                baseRadius = 32;
+                auraLayers = 4;
+            }
+
+            const radius = baseRadius * pulse;
+
+            // Multiple aura layers
+            this.ctx.globalCompositeOperation = 'lighter';
+            for (let layer = auraLayers; layer >= 1; layer--) {
+                const layerRadius = radius + layer * 20;
+                const gradient = this.ctx.createRadialGradient(mystery.x, mystery.y, 0, mystery.x, mystery.y, layerRadius);
+                gradient.addColorStop(0, `hsla(${mystery.hue}, 80%, 70%, ${0.3 * alpha / layer})`);
+                gradient.addColorStop(0.5, `hsla(${mystery.hue}, 70%, 60%, ${0.15 * alpha / layer})`);
+                gradient.addColorStop(1, 'rgba(0,0,0,0)');
+
+                this.ctx.fillStyle = gradient;
+                this.ctx.beginPath();
+                this.ctx.arc(mystery.x, mystery.y, layerRadius, 0, Math.PI * 2);
+                this.ctx.fill();
+            }
+            this.ctx.globalCompositeOperation = 'source-over';
+
+            // Rotating ring effect for legendary
+            if (mystery.rarity === 'legendary') {
+                this.ctx.save();
+                this.ctx.translate(mystery.x, mystery.y);
+                this.ctx.rotate(rotate);
+
+                this.ctx.strokeStyle = `hsla(${mystery.hue}, 90%, 75%, ${0.6 * alpha})`;
+                this.ctx.lineWidth = 2;
+                this.ctx.beginPath();
+                for (let i = 0; i < 6; i++) {
+                    const angle = (i / 6) * Math.PI * 2;
+                    const innerR = radius + 12;
+                    const outerR = radius + 25;
+                    this.ctx.moveTo(Math.cos(angle) * innerR, Math.sin(angle) * innerR);
+                    this.ctx.lineTo(Math.cos(angle) * outerR, Math.sin(angle) * outerR);
+                }
+                this.ctx.stroke();
+
+                this.ctx.restore();
+            }
+
+            // Inner halo
+            const innerGradient = this.ctx.createRadialGradient(mystery.x, mystery.y, 0, mystery.x, mystery.y, radius);
+            innerGradient.addColorStop(0, `hsla(${mystery.hue}, 90%, 85%, ${0.9 * alpha})`);
+            innerGradient.addColorStop(0.6, `hsla(${mystery.hue}, 80%, 70%, ${0.5 * alpha})`);
+            innerGradient.addColorStop(1, 'rgba(0,0,0,0)');
+            this.ctx.fillStyle = innerGradient;
+            this.ctx.beginPath();
+            this.ctx.arc(mystery.x, mystery.y, radius, 0, Math.PI * 2);
+            this.ctx.fill();
+
+            // Core spark
+            this.ctx.fillStyle = `hsla(${mystery.hue}, 100%, 95%, ${alpha})`;
+            this.ctx.shadowColor = `hsla(${mystery.hue}, 100%, 80%, 0.8)`;
+            this.ctx.shadowBlur = 25;
+            this.ctx.beginPath();
+            this.ctx.arc(mystery.x, mystery.y, 8 * pulse, 0, Math.PI * 2);
+            this.ctx.fill();
+            this.ctx.shadowBlur = 0;
+
+            // Name label
+            this.ctx.strokeStyle = `rgba(0,0,0,${0.7 * alpha})`;
+            this.ctx.lineWidth = 3;
+            this.ctx.font = 'bold 11px Inter, sans-serif';
+            this.ctx.textAlign = 'center';
+            this.ctx.strokeText(mystery.name, mystery.x, mystery.y - radius - 12);
+            this.ctx.fillStyle = `hsla(${mystery.hue}, 70%, 90%, ${alpha})`;
+            this.ctx.fillText(mystery.name, mystery.x, mystery.y - radius - 12);
+
+            // Rarity indicator
+            let rarityIcon = '⭐';
+            if (mystery.rarity === 'epic') rarityIcon = '💫';
+            else if (mystery.rarity === 'legendary') rarityIcon = '👑';
+
+            this.ctx.font = '14px sans-serif';
+            this.ctx.fillText(rarityIcon, mystery.x, mystery.y - radius - 28);
+        }
     }
 }
